@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fashion-recommender"
+version = "0.1.0"
+description = "Two-tower fashion recommender tooling extracted from notebook workflow"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Patron" }]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "python-dotenv>=1.0",
+  "pydantic>=2.8",
+  "pydantic-settings>=2.4",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.3",
+  "sentence-transformers>=3.0",
+  "transformers>=4.40",
+  "faiss-cpu>=1.8",
+]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.6",
+  "mypy>=1.10",
+]
+
+[project.scripts]
+reco = "recommender.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recommender"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
