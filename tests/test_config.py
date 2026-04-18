@@ -10,6 +10,6 @@ def test_default_settings() -> None:
 
 def test_paths_are_constructed() -> None:
     s = Settings()
-    assert s.notebook_path.name == "recotwotower.ipynb"
+    assert s.catalog_path.name == "amazon_categories.csv"
     assert s.index_path.name.endswith(".faiss")
     assert s.vectors_path.name.endswith(".npy")

@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     random_seed: int = 42
 
     @property
-    def notebook_path(self) -> Path:
-        return self.drive_dir / "recotwotower.ipynb"
+    def catalog_path(self) -> Path:
+        return self.drive_dir / "amazon_categories.csv"
 
     @property
     def artifacts_dir(self) -> Path:
