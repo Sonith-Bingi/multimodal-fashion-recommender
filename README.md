@@ -47,7 +47,6 @@ This repository implements a production-ready, multimodal recommender system for
 
 ```text
 .
-├── recotwotower.ipynb         # Main notebook pipeline
 ├── scripts/
 │   ├── train.py               # CLI entry: training
 │   └── evaluate.py            # CLI entry: evaluation
@@ -57,7 +56,8 @@ This repository implements a production-ready, multimodal recommender system for
 │       ├── cli.py             # CLI logic
 │       ├── config.py          # Pydantic config
 │       ├── logging_utils.py   # Logging setup
-│       ├── pipeline.py        # Artifact checks, summary
+│       ├── pipeline.py        # Public API wrapper
+│       ├── production_pipeline.py # Production train/eval/recommend logic
 │       └── utils.py           # Utilities
 ├── tests/
 │   └── test_config.py         # Example unit tests

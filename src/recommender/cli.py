@@ -49,8 +49,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "recall_at_5": metrics.recall_at_5,
                     "recall_at_10": metrics.recall_at_10,
+                    "ndcg_at_10": metrics.ndcg_at_10,
                     "mrr_at_10": metrics.mrr_at_10,
                 },
                 indent=2,

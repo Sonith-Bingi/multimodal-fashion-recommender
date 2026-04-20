@@ -23,6 +23,22 @@ class Settings(BaseSettings):
         return self.drive_dir / "amazon_categories.csv"
 
     @property
+    def meta_path(self) -> Path:
+        return self.drive_dir / "meta_Amazon_Fashion.jsonl"
+
+    @property
+    def review_path(self) -> Path:
+        return self.drive_dir / "Amazon_Fashion.jsonl"
+
+    @property
+    def catalog_cache_path(self) -> Path:
+        return self.drive_dir / f"fashion_products_kcore{self.dense_k}.csv"
+
+    @property
+    def item_embs_path(self) -> Path:
+        return self.drive_dir / f"item_embs_mpnet_kcore{self.dense_k}.npy"
+
+    @property
     def artifacts_dir(self) -> Path:
         return self.drive_dir / "artifacts"
 
