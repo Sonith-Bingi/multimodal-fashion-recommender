@@ -32,6 +32,12 @@ TOWER_DIM = 256
 DROPOUT = 0.15
 MAX_HIST_LEN = 64
 
+# Buffers registered by TwoTowerModel.register_popular_pool() for the training-
+# time contrastive loss. Absent from the plain TwoTowerModel() built for
+# inference (which never calls register_popular_pool()), so they're expected
+# to show up as "unexpected" when loading a training checkpoint at inference.
+TRAINING_ONLY_STATE_KEYS = frozenset({"_pop_text_embs", "_pop_img_embs", "_pop_ids"})
+
 
 @dataclass
 class ArtifactStatus:
@@ -907,7 +913,23 @@ class RecommenderPipeline:
 
         try:
             state = torch.load(state_path, map_location=device)
-            model.load_state_dict(state)
+            # _pop_text_embs/_pop_img_embs/_pop_ids are training-only buffers
+            # registered by register_popular_pool() for computing the
+            # contrastive loss against the popularity pool. encode_user() and
+            # encode_item() (the only methods used at inference time) never
+            # touch them, and the inference-time model never calls
+            # register_popular_pool(), so they're expected to be absent here.
+            # A strict load would reject the checkpoint over that alone.
+            result = model.load_state_dict(state, strict=False)
+            unexpected = set(result.unexpected_keys) - TRAINING_ONLY_STATE_KEYS
+            if result.missing_keys or unexpected:
+                logger.warning(
+                    "Two-tower state_dict mismatch (missing=%s, unexpected=%s); "
+                    "falling back to mean-pooled retrieval",
+                    result.missing_keys,
+                    sorted(unexpected),
+                )
+                return None
         except Exception as exc:
             logger.warning("Could not load two-tower state for sequence-aware retrieval: %s", exc)
             return None
