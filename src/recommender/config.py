@@ -5,13 +5,16 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_DIR = REPO_ROOT / "data"
+
 
 class Settings(BaseSettings):
     """Runtime configuration loaded from env vars and sane defaults."""
 
     model_config = SettingsConfigDict(env_prefix="RECO_", env_file=".env", extra="ignore")
 
-    drive_dir: Path = Field(default=Path("/Users/Patron/Desktop/Recommender"))
+    drive_dir: Path = Field(default=DEFAULT_DATA_DIR)
     dense_k: int = Field(default=3, ge=2)
     seq_len: int = Field(default=15, ge=1)
     min_seq: int = Field(default=3, ge=2)

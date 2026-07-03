@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import random
 import shutil
-import io
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -46,8 +46,7 @@ def _try_import_torch() -> Any | None:
         import torch
         import torch.nn as nn
         import torch.nn.functional as F
-        from torch.utils.data import DataLoader
-        from torch.utils.data import Dataset
+        from torch.utils.data import DataLoader, Dataset
 
         return {
             "torch": torch,
@@ -319,9 +318,8 @@ def _build_torch_model(emb_dim: int, num_catalog_items: int) -> tuple[type, type
         def forward(self, hist_embs: Any, mask: Any) -> Any:
             bsz, length, _ = hist_embs.shape
             x = self.input_proj(hist_embs)
-            pos_idx = (torch.arange(length, device=hist_embs.device) % MAX_HIST_LEN).unsqueeze(0).expand(
-                bsz, length
-            )
+            pos_idx = (torch.arange(length, device=hist_embs.device) % MAX_HIST_LEN)
+            pos_idx = pos_idx.unsqueeze(0).expand(bsz, length)
             x = x + self.pos_emb(pos_idx)
             x = self.encoder(x, src_key_padding_mask=mask)
             lengths = (~mask).sum(dim=1).clamp(min=1)
@@ -347,7 +345,9 @@ def _build_torch_model(emb_dim: int, num_catalog_items: int) -> tuple[type, type
         def encode_item(self, text_emb: Any, img_emb: Any, item_ids: Any) -> Any:
             return self.item_tower(text_emb, img_emb, item_ids)
 
-        def forward(self, hist_embs: Any, hist_mask: Any, tgt_pos: Any, hist_pos: Any | None = None) -> Any:
+        def forward(
+            self, hist_embs: Any, hist_mask: Any, tgt_pos: Any, hist_pos: Any | None = None
+        ) -> Any:
             user_vecs = self.encode_user(hist_embs, hist_mask)
             u = F.normalize(user_vecs, dim=-1)
             temp = self.log_temp.exp().clamp(0.02, 0.40)
@@ -383,11 +383,15 @@ class RecommenderPipeline:
         return self.settings.artifacts_dir / "two_tower_model.pt"
 
     def _clip_img_emb_path(self, top_n: int) -> Path:
-        return self.settings.drive_dir / f"train_target_img_embs_clip_kcore{self.settings.dense_k}_top{top_n}.npy"
+        name = f"train_target_img_embs_clip_kcore{self.settings.dense_k}_top{top_n}.npy"
+        return self.settings.drive_dir / name
 
     def validate_artifacts(self) -> ArtifactStatus:
+        catalog_exists = (
+            self.settings.catalog_path.exists() or self.settings.catalog_cache_path.exists()
+        )
         return ArtifactStatus(
-            catalog=self.settings.catalog_path.exists() or self.settings.catalog_cache_path.exists(),
+            catalog=catalog_exists,
             index=self.settings.index_path.exists(),
             vectors=self.settings.vectors_path.exists(),
             meta=self.settings.meta_path.exists(),
@@ -410,7 +414,9 @@ class RecommenderPipeline:
             return out
         raise ValueError("Fallback catalog must contain id and category_name")
 
-    def prepare_data(self) -> tuple[pd.DataFrame, dict[str, list[tuple[int, str]]], dict[str, list[tuple[int, str]]]]:
+    def prepare_data(
+        self,
+    ) -> tuple[pd.DataFrame, dict[str, list[tuple[int, str]]], dict[str, list[tuple[int, str]]]]:
         ensure_dir(self.settings.artifacts_dir)
 
         if self.settings.catalog_cache_path.exists():
@@ -432,7 +438,7 @@ class RecommenderPipeline:
 
         logger.info("Loading product metadata from %s", meta_path)
         meta_records: list[dict[str, Any]] = []
-        with open(meta_path, "r", encoding="utf-8") as f:
+        with open(meta_path, encoding="utf-8") as f:
             for line in f:
                 d = json.loads(line)
                 imgs = d.get("images") or []
@@ -453,7 +459,9 @@ class RecommenderPipeline:
         fashion_products = fashion_products.dropna(subset=["asin", "title"])
         fashion_products = fashion_products[fashion_products["title"].astype(str).str.strip() != ""]
         fashion_products = fashion_products.drop_duplicates(subset="asin").reset_index(drop=True)
-        fashion_products["price"] = pd.to_numeric(fashion_products["price"], errors="coerce").fillna(0.0)
+        fashion_products["price"] = pd.to_numeric(
+            fashion_products["price"], errors="coerce"
+        ).fillna(0.0)
         fashion_products["categories"] = fashion_products["categories"].fillna("Amazon Fashion")
         fashion_products["text"] = (
             fashion_products["title"].astype(str).str.strip()
@@ -464,7 +472,7 @@ class RecommenderPipeline:
 
         valid_asins = set(fashion_products["asin"].tolist())
         user_events: dict[str, list[tuple[int, str]]] = {}
-        with open(review_path, "r", encoding="utf-8") as f:
+        with open(review_path, encoding="utf-8") as f:
             for line in f:
                 d = json.loads(line)
                 uid = str(d.get("user_id", ""))
@@ -520,7 +528,9 @@ class RecommenderPipeline:
             )
             item_embs = np.array(item_embs, dtype=np.float32)
         except Exception as exc:
-            logger.warning("sentence-transformers unavailable, using fallback text encoder: %s", exc)
+            logger.warning(
+                "sentence-transformers unavailable, using fallback text encoder: %s", exc
+            )
             item_embs = np.stack([_token_fallback_embedding(t) for t in texts], axis=0)
 
         np.save(self.settings.item_embs_path, item_embs)
@@ -560,7 +570,7 @@ class RecommenderPipeline:
                 return self.seqs[index]
 
         def collate_fn(batch: list[tuple[list[int], int]]) -> tuple[Any, Any, Any, Any, Any, Any]:
-            hists, targets = zip(*batch)
+            hists, targets = zip(*batch, strict=True)
             max_len = max(len(h) for h in hists)
             padded, masks = [], []
             for hist in hists:
@@ -608,7 +618,8 @@ class RecommenderPipeline:
         train_target_counts = Counter(t for _, t in train_seqs)
         ranked_targets = [idx for idx, _ in train_target_counts.most_common()]
         max_clip_items = 5000
-        clip_item_ids = np.array(ranked_targets[: min(max_clip_items, len(ranked_targets))], dtype=np.int64)
+        n_clip_items = min(max_clip_items, len(ranked_targets))
+        clip_item_ids = np.array(ranked_targets[:n_clip_items], dtype=np.int64)
         if len(clip_item_ids) == 0:
             return img_embs_with_pad
 
@@ -623,10 +634,11 @@ class RecommenderPipeline:
 
         if clip_img_embs is None:
             try:
+                from concurrent.futures import ThreadPoolExecutor
+
                 import requests
                 from PIL import Image
-                from concurrent.futures import ThreadPoolExecutor
-                from transformers import CLIPProcessor, CLIPModel
+                from transformers import CLIPModel, CLIPProcessor
 
                 clip_img_urls = fashion_products.iloc[clip_item_ids]["imgUrl"].fillna("").tolist()
 
@@ -635,7 +647,8 @@ class RecommenderPipeline:
                     if not url:
                         return pos, None
                     try:
-                        response = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
+                        headers = {"User-Agent": "Mozilla/5.0"}
+                        response = requests.get(url, timeout=6, headers=headers)
                         if response.status_code == 200:
                             return pos, Image.open(io.BytesIO(response.content)).convert("RGB")
                     except Exception:
@@ -699,7 +712,9 @@ class RecommenderPipeline:
         nn = torch_ctx["nn"]
         F = torch_ctx["F"]
 
-        model_defs = _build_torch_model(emb_dim=item_embs.shape[1], num_catalog_items=len(item_embs) + 1)
+        model_defs = _build_torch_model(
+            emb_dim=item_embs.shape[1], num_catalog_items=len(item_embs) + 1
+        )
         if model_defs is None:
             return _normalize_rows(item_embs.astype(np.float32))
         _item_cls, _user_cls, TwoTowerModel = model_defs
@@ -750,7 +765,9 @@ class RecommenderPipeline:
         lr = 5e-4
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs, eta_min=1e-5
+        )
         scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
 
         item_to_pop_pos = torch.full((item_embs_t.size(0),), -1, dtype=torch.long, device=device)
@@ -810,7 +827,9 @@ class RecommenderPipeline:
 
                 if ema_val < best_ema_val:
                     best_ema_val = ema_val
-                    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    best_state = {
+                        k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                    }
                     patience = 0
                 else:
                     patience += 1
@@ -924,7 +943,8 @@ class RecommenderPipeline:
         item_embs = self._build_item_embeddings(fashion_products)
         item_embs = _normalize_rows(item_embs.astype(np.float32))
 
-        asin_to_idx = {a: i for i, a in enumerate(fashion_products["asin"].astype(str).tolist())}
+        asins = fashion_products["asin"].astype(str).tolist()
+        asin_to_idx = {a: i for i, a in enumerate(asins)}
         train_seqs, val_seqs, val_novel_seqs, sparse_val_seqs = _build_sequences(
             user_events=user_events,
             raw_user_events_backup=raw_backup,
@@ -996,7 +1016,9 @@ class RecommenderPipeline:
             q = vectors[np.array(hist_indices)].mean(axis=0, keepdims=True)
         return _normalize_rows(q.astype(np.float32))
 
-    def _retrieve(self, vectors: np.ndarray, hist_indices: list[int], k: int) -> list[tuple[float, int]]:
+    def _retrieve(
+        self, vectors: np.ndarray, hist_indices: list[int], k: int
+    ) -> list[tuple[float, int]]:
         q = self._encode_user_history(vectors, hist_indices)
         seen = set(hist_indices)
 
@@ -1017,7 +1039,7 @@ class RecommenderPipeline:
             scores, indices = idx_obj.search(q.astype(np.float32), k + extra)
             results = [
                 (float(s), int(i))
-                for s, i in zip(scores[0], indices[0])
+                for s, i in zip(scores[0], indices[0], strict=True)
                 if int(i) not in seen
             ]
             return results[:k]
@@ -1033,7 +1055,9 @@ class RecommenderPipeline:
                 break
         return results
 
-    def _run_eval(self, vectors: np.ndarray, samples: list[tuple[list[int], int]], k: int = 10) -> EvalMetrics:
+    def _run_eval(
+        self, vectors: np.ndarray, samples: list[tuple[list[int], int]], k: int = 10
+    ) -> EvalMetrics:
         if not samples:
             return EvalMetrics(0.0, 0.0, 0.0)
 
@@ -1069,7 +1093,8 @@ class RecommenderPipeline:
             ]
         else:
             fashion_products, user_events, raw_backup = self.prepare_data()
-            asin_to_idx = {a: i for i, a in enumerate(fashion_products["asin"].astype(str).tolist())}
+            asins = fashion_products["asin"].astype(str).tolist()
+            asin_to_idx = {a: i for i, a in enumerate(asins)}
             _, val_seqs, _, _ = _build_sequences(
                 user_events=user_events,
                 raw_user_events_backup=raw_backup,

@@ -4,8 +4,8 @@ from recommender.config import Settings
 from recommender.pipeline import RecommenderPipeline
 
 
-def test_train_and_evaluate_smoke() -> None:
-    pipeline = RecommenderPipeline(Settings())
+def test_train_and_evaluate_smoke(synthetic_settings: Settings) -> None:
+    pipeline = RecommenderPipeline(synthetic_settings)
 
     train_result = pipeline.train()
     assert train_result["items"] > 0
@@ -17,8 +17,8 @@ def test_train_and_evaluate_smoke() -> None:
     assert 0.0 <= metrics.mrr_at_10 <= 1.0
 
 
-def test_evaluation_is_stable_for_fixed_artifacts() -> None:
-    pipeline = RecommenderPipeline(Settings())
+def test_evaluation_is_stable_for_fixed_artifacts(synthetic_settings: Settings) -> None:
+    pipeline = RecommenderPipeline(synthetic_settings)
     pipeline.train()
 
     m1 = pipeline.evaluate()
