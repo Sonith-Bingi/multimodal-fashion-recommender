@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import math
+import os
 import random
 import shutil
 from collections import Counter
@@ -16,6 +17,13 @@ import pandas as pd
 
 from .config import Settings
 from .utils import ensure_dir
+
+# torch and faiss-cpu each bundle their own OpenMP runtime; loading both in one
+# process aborts the interpreter ("OMP: Error #15") unless this is set before
+# either is imported. Both are only ever imported lazily below (via
+# _try_import_torch / _try_import_faiss), so setting it here at module import
+# time is early enough.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 logger = logging.getLogger(__name__)
 

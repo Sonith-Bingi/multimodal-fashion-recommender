@@ -120,9 +120,14 @@ All major steps (artifact check, summary, training, evaluation) are available vi
 ## Notes
 
 - Default settings: `DENSE_K = 3`, `SEQ_LEN = 15`
-- Artifact checks expect these files in repo root:
+- Data and artifacts default to `<repo_root>/data` (override with `RECO_DRIVE_DIR`). Artifact
+  checks expect these files there:
   - `item_index_v11.faiss` (multimodal index)
   - `item_tower_vecs_v11.npy` (multimodal item vectors)
+- If you install the `train` extra and see the process abort during training/evaluation
+  with an OpenMP error, it's a known conflict between the OpenMP runtimes bundled in
+  `torch` and `faiss-cpu`. It's already worked around internally via `KMP_DUPLICATE_LIB_OK`,
+  but if you hit it anyway, set `KMP_DUPLICATE_LIB_OK=TRUE` in your shell before running.
 
 
 

@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # torch and faiss-cpu each bundle their own OpenMP runtime; running both
+      # in one process aborts the interpreter unless this is set.
+      KMP_DUPLICATE_LIB_OK: "TRUE"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,7 +21,10 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          # CPU-only wheel: far smaller/faster than the default CUDA build and
+          # all a GPU-less runner needs to run the real two-tower model.
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.3"
+          pip install -e ".[dev,ci]"
       - name: Lint
         run: ruff check .
       - name: Tests

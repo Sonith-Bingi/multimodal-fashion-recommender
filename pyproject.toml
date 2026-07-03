@@ -33,6 +33,14 @@ dev = [
   "ruff>=0.6",
   "mypy>=1.10",
 ]
+# Lightweight subset of `train` used in CI so the real two-tower model and
+# FAISS retrieval get exercised. Deliberately excludes sentence-transformers/
+# transformers, which would pull large pretrained weights over the network
+# on every run; embeddings fall back to the deterministic offline path instead.
+ci = [
+  "torch>=2.3",
+  "faiss-cpu>=1.8",
+]
 
 [project.scripts]
 reco = "recommender.cli:main"
