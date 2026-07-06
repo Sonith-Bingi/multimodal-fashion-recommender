@@ -38,6 +38,10 @@ class Settings(BaseSettings):
         return self.drive_dir / f"fashion_products_kcore{self.dense_k}.csv"
 
     @property
+    def dense_events_cache_path(self) -> Path:
+        return self.drive_dir / f"dense_events_kcore{self.dense_k}.jsonl"
+
+    @property
     def item_embs_path(self) -> Path:
         return self.drive_dir / f"item_embs_mpnet_kcore{self.dense_k}.npy"
 

@@ -428,16 +428,37 @@ class RecommenderPipeline:
             return out
         raise ValueError("Fallback catalog must contain id and category_name")
 
+    def _load_dense_events_cache(self) -> dict[str, list[tuple[int, str]]]:
+        user_events: dict[str, list[tuple[int, str]]] = {}
+        with self.settings.dense_events_cache_path.open(encoding="utf-8") as f:
+            for line in f:
+                d = json.loads(line)
+                user_events.setdefault(d["user_id"], []).append((d["ts"], d["asin"]))
+        return user_events
+
+    def _save_dense_events_cache(self, user_events: dict[str, list[tuple[int, str]]]) -> None:
+        with self.settings.dense_events_cache_path.open("w", encoding="utf-8") as f:
+            for uid, events in user_events.items():
+                for ts, asin in events:
+                    f.write(json.dumps({"user_id": uid, "ts": ts, "asin": asin}) + "\n")
+
     def prepare_data(
         self,
     ) -> tuple[pd.DataFrame, dict[str, list[tuple[int, str]]], dict[str, list[tuple[int, str]]]]:
         ensure_dir(self.settings.artifacts_dir)
 
-        if self.settings.catalog_cache_path.exists():
+        catalog_cached = self.settings.catalog_cache_path.exists()
+        events_cached = self.settings.dense_events_cache_path.exists()
+        if catalog_cached and events_cached:
             fashion_products = pd.read_csv(self.settings.catalog_cache_path)
             if "asin" in fashion_products.columns and "text" in fashion_products.columns:
                 logger.info("Loaded cached dense catalog: %s", self.settings.catalog_cache_path)
-                return fashion_products, {}, {}
+                user_events = self._load_dense_events_cache()
+                # sparse_val_seqs (built from users outside the dense set) can't be
+                # reconstructed without the full pre-filter interaction log, which
+                # this cache intentionally doesn't keep; only that diagnostic split
+                # is affected on a cache hit, not train_seqs/val_seqs.
+                return fashion_products, user_events, dict(user_events)
 
         meta_path = self.settings.meta_path
         review_path = self.settings.review_path
@@ -520,6 +541,7 @@ class RecommenderPipeline:
         )
 
         fashion_products.to_csv(self.settings.catalog_cache_path, index=False)
+        self._save_dense_events_cache(user_events)
         return fashion_products, user_events, raw_backup
 
     def _build_item_embeddings(self, fashion_products: pd.DataFrame) -> np.ndarray:
@@ -601,6 +623,8 @@ class RecommenderPipeline:
             tgt_img_embs = img_embs_t[tgt_idx]
             return hist_embs, hist_mask, tgt_embs, tgt_img_embs, tgt_idx, hist_idx
 
+        shuffle_generator = torch.Generator()
+        shuffle_generator.manual_seed(self.settings.random_seed)
         train_dl = DataLoader(
             InteractionDataset(pop_train_seqs),
             batch_size=self.settings.batch_size,
@@ -608,6 +632,7 @@ class RecommenderPipeline:
             collate_fn=collate_fn,
             num_workers=0,
             pin_memory=False,
+            generator=shuffle_generator,
         )
         val_dl = DataLoader(
             InteractionDataset(pop_val_seqs),
@@ -760,6 +785,10 @@ class RecommenderPipeline:
         train_dl, val_dl, pop_pos_lookup = loaders
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Fixes weight init + dropout masks so runs are comparable/reproducible;
+        # DataLoader shuffling is separately seeded in _build_interaction_dataloaders.
+        torch.manual_seed(self.settings.random_seed)
 
         model = TwoTowerModel().to(device)
         popular_idxs = torch.tensor(popular_items, dtype=torch.long)
