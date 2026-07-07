@@ -56,9 +56,12 @@ This repository implements a production-ready, multimodal recommender system for
 │       ├── api.py             # FastAPI serving layer (/health, /status, /recommend)
 │       ├── cli.py             # CLI logic
 │       ├── config.py          # Pydantic config
+│       ├── data.py            # Raw data download, k-core filtering, sequences
+│       ├── models.py          # Two-tower architecture (user/item towers)
+│       ├── retrieval.py       # FAISS retrieval + ranking metrics
 │       ├── logging_utils.py   # Logging setup
 │       ├── pipeline.py        # Public API wrapper
-│       ├── production_pipeline.py # Production train/eval/recommend logic
+│       ├── train.py           # Training/eval/recommend orchestration
 │       └── utils.py           # Utilities
 ├── tests/
 │   ├── conftest.py            # Synthetic offline dataset fixture
