@@ -41,6 +41,10 @@ ci = [
   "torch>=2.3",
   "faiss-cpu>=1.8",
 ]
+api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+]
 
 [project.scripts]
 reco = "recommender.cli:main"

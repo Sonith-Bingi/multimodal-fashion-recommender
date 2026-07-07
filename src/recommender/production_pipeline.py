@@ -1205,9 +1205,12 @@ def run_full_evaluation() -> None:
     )
 
 
-def recommend_for_history(history: list[str], top_k: int = 5) -> list[dict[str, object]]:
-    settings = Settings()
-    pipeline = RecommenderPipeline(settings)
+def recommend_for_history(
+    history: list[str], top_k: int = 5, pipeline: RecommenderPipeline | None = None
+) -> list[dict[str, object]]:
+    if pipeline is None:
+        pipeline = RecommenderPipeline(Settings())
+    settings = pipeline.settings
 
     if not settings.vectors_path.exists():
         pipeline.train()
@@ -1238,6 +1241,9 @@ def recommend_for_history(history: list[str], top_k: int = 5) -> list[dict[str, 
     if not matched_indices:
         matched_indices = [0]
 
+    def _clean_str(value: Any) -> str:
+        return "" if pd.isna(value) else str(value)
+
     retrieved = pipeline._retrieve(vectors, matched_indices, k=top_k)
     out: list[dict[str, object]] = []
     for rank, (score, idx) in enumerate(retrieved, start=1):
@@ -1246,8 +1252,8 @@ def recommend_for_history(history: list[str], top_k: int = 5) -> list[dict[str, 
             {
                 "rank": rank,
                 "item_index": idx,
-                "title": str(row.get("title", "")),
-                "categories": str(row.get("categories", "")),
+                "title": _clean_str(row.get("title", "")),
+                "categories": _clean_str(row.get("categories", "")),
                 "score": score,
             }
         )
