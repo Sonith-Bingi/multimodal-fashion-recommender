@@ -60,6 +60,57 @@ Real Amazon Fashion data, `dense_k=3`, evaluated on genuinely novel targets
 Recall@10 of 17% against a 5,015-item catalog is ~85x better than random
 chance (0.2%).
 
+## Tech stack
+
+**ML / modeling**
+- [PyTorch](https://pytorch.org/) — two-tower model (transformer user tower, attention-fused item tower), training loop, mixed precision
+- [Sentence-Transformers](https://www.sbert.net/) (`all-mpnet-base-v2`) — real semantic text embeddings
+- Hugging Face [`transformers`](https://huggingface.co/docs/transformers) (CLIP ViT-B/32) — image embeddings
+- [FAISS](https://github.com/facebookresearch/faiss) (`faiss-cpu`) — nearest-neighbor retrieval index
+- NumPy / Pandas — k-core filtering, sequence construction, embedding math
+
+**Data**
+- [Hugging Face Hub](https://huggingface.co/docs/huggingface_hub) — dataset download
+- [McAuley-Lab/Amazon-Reviews-2023](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023) — real Amazon Fashion metadata + reviews
+
+**Backend / API**
+- [FastAPI](https://fastapi.tiangolo.com/) — serving layer (`/health`, `/status`, `/recommend`), auto-generated OpenAPI docs at `/docs`
+- [Uvicorn](https://www.uvicorn.org/) — ASGI server
+- [Pydantic](https://docs.pydantic.dev/) / `pydantic-settings` — request/response validation, typed env-based config
+
+**Frontend**
+- Vanilla HTML/CSS/JavaScript — no framework, no build step, no dependencies — the `ui/` demo (see [Serving](#serving-fastapi--docker--ui))
+
+**Infra / deployment**
+- [Docker](https://www.docker.com/) + docker-compose — containerized serving
+- [GitHub Actions](.github/workflows/ci.yml) — CI (lint + the *real* two-tower model and FAISS retrieval, not a stub)
+- [Hugging Face Spaces](https://huggingface.co/docs/hub/spaces) (Docker SDK) — live deployment
+
+**Dev tooling**
+- [pytest](https://docs.pytest.org/) — fully offline synthetic-data fixture + integration tests
+- [ruff](https://docs.astral.sh/ruff/) — linting
+- [pre-commit](https://pre-commit.com/) — lint/format hooks
+- [hatchling](https://hatch.pypa.io/) — packaging (`pyproject.toml`)
+
+## How it works
+
+**Offline — training** (`data.py`, `models.py`, `train.py`)
+
+1. **Ingest** — download `meta_Amazon_Fashion.jsonl` / `Amazon_Fashion.jsonl` from the Hugging Face Hub.
+2. **Densify** — iterative k-core filtering drops users/items with fewer than `k` interactions until convergence. On the real dataset this collapses **2,035,398 raw users down to a dense 5,277-user / 5,015-item subset**.
+3. **Embed items** — each catalog item gets a text embedding (Sentence-Transformer, or a deterministic hash fallback if unavailable), a CLIP image embedding (computed for the top 5,000 most-frequent training targets), and a learned ID embedding.
+4. **Build sequences** — each user's interaction history becomes training windows plus a held-out validation target — both a naive "last interaction" target and a *genuinely novel* one (`val_novel`), which the [model card](MODEL_CARD.md) explains is the one that's actually fair to evaluate on.
+5. **Train** — the two-tower model trains against a temperature-scaled contrastive loss over a popularity pool of training-target items (AdamW, cosine annealing, early stopping on EMA-smoothed validation loss). Fully deterministic given a fixed seed.
+6. **Index** — the trained item tower encodes the full catalog once; L2-normalized vectors are written to a FAISS `IndexFlatIP` index and saved to disk alongside the model checkpoint.
+
+**Online — serving a request** (`api.py`, `retrieval.py`)
+
+1. `POST /recommend` arrives with a list of history strings, e.g. `["Swim Trunk", "Sunglasses"]`.
+2. Each string is matched to a catalog item by substring search over title/category.
+3. The matched items' embeddings are run through the **already-trained** user tower (loaded once at process startup and reused across requests, not reloaded per call) to produce one query vector.
+4. FAISS returns the nearest item vectors, excluding anything already in the supplied history.
+5. Results (title, category, image URL, similarity score) come back as JSON, or get rendered directly as cards by the `ui/` frontend.
+
 ## Architecture
 
 ```mermaid
