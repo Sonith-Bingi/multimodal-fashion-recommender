@@ -53,6 +53,7 @@ This repository implements a production-ready, multimodal recommender system for
 ├── src/
 │   └── recommender/
 │       ├── __init__.py
+│       ├── api.py             # FastAPI serving layer (/health, /status, /recommend)
 │       ├── cli.py             # CLI logic
 │       ├── config.py          # Pydantic config
 │       ├── logging_utils.py   # Logging setup
@@ -60,13 +61,18 @@ This repository implements a production-ready, multimodal recommender system for
 │       ├── production_pipeline.py # Production train/eval/recommend logic
 │       └── utils.py           # Utilities
 ├── tests/
-│   └── test_config.py         # Example unit tests
+│   ├── conftest.py            # Synthetic offline dataset fixture
+│   ├── test_config.py         # Example unit tests
+│   └── test_integration_pipeline.py
 ├── .github/workflows/ci.yml   # GitHub Actions CI
 ├── pyproject.toml             # Packaging, dependencies
 ├── requirements.txt           # Pinned requirements
 ├── .env.example               # Example environment config
 ├── Makefile                   # Dev commands
+├── Dockerfile                 # Container image for the FastAPI service
+├── docker-compose.yml         # Local run with a mounted data volume
 ├── .pre-commit-config.yaml    # Lint/format hooks
+├── MODEL_CARD.md              # Architecture, data, results, ablations
 ├── LICENSE                    # MIT License
 └── README.md                  # This file
 ```
@@ -116,6 +122,32 @@ All major steps (artifact check, summary, training, evaluation) are available vi
   pytest
   ```
 
+
+## Serving (FastAPI + Docker)
+
+Once you have trained artifacts (`reco train`), you can serve recommendations
+over HTTP:
+
+```bash
+pip install -e ".[api]"
+uvicorn recommender.api:app --host 0.0.0.0 --port 8000
+```
+
+```bash
+curl -X POST http://localhost:8000/recommend \
+  -H "Content-Type: application/json" \
+  -d '{"history": ["Swim Trunk", "Sunglasses", "Flip Flop"], "top_k": 5}'
+```
+
+Or run the whole thing in a container, mounting your data/artifacts directory:
+
+```bash
+docker compose up --build
+```
+
+`GET /health` is a plain liveness check; `GET /status` reports which trained
+artifacts are present; `POST /recommend` returns 503 (rather than silently
+kicking off a multi-minute training run) if the model hasn't been trained yet.
 
 ## Notes
 
