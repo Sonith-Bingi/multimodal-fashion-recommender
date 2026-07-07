@@ -1,5 +1,8 @@
 # multimodal-fashion-recommender
 
+**Live demo:** https://huggingface.co/spaces/htinos/multimodal-fashion-recommender
+(`POST /recommend` with `{"history": ["Swim Trunk", "Sunglasses"], "top_k": 5}`)
+
 This repository implements a production-ready, multimodal recommender system for Amazon Fashion products using a modern two-tower deep learning architecture. The system leverages both text and image features for each product, enabling richer and more accurate recommendations than unimodal approaches. The project is fully modularized for reproducibility, extensibility, and GitHub best practices.
 
 ## Project Overview (Multimodal)
