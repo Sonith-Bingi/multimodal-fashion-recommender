@@ -1147,14 +1147,21 @@ class RecommenderPipeline:
         split_path = self.settings.artifacts_dir / "splits.json"
         if split_path.exists():
             splits = json.loads(split_path.read_text(encoding="utf-8"))
+            # _retrieve() excludes every item already in the user's history from
+            # the candidate results, so a target that's a repeat of something the
+            # user already interacted with can never be retrieved regardless of
+            # model quality. splits["val"] always holds out the literal last
+            # event, repeat or not; splits["val_novel"] walks back to the most
+            # recent genuinely novel target per user, which is the fair
+            # comparison given how _retrieve() works.
             val_seqs = [
-                (list(map(int, hist)), int(tgt)) for hist, tgt in splits.get("val", [])
+                (list(map(int, hist)), int(tgt)) for hist, tgt in splits.get("val_novel", [])
             ]
         else:
             fashion_products, user_events, raw_backup = self.prepare_data()
             asins = fashion_products["asin"].astype(str).tolist()
             asin_to_idx = {a: i for i, a in enumerate(asins)}
-            _, val_seqs, _, _ = _build_sequences(
+            _, _, val_seqs, _ = _build_sequences(
                 user_events=user_events,
                 raw_user_events_backup=raw_backup,
                 asin_to_idx=asin_to_idx,
