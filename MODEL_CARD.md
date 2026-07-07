@@ -11,6 +11,28 @@ search (FAISS) between a user vector and the item catalog.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph user["User tower — run at request time (models.py: UserTower)"]
+        H["User history\n(sequence of item vectors)"] --> UT["Transformer encoder\n+ positional embeddings"]
+        UT --> UV["User vector\n256-dim, L2-normalized"]
+    end
+
+    subgraph item["Item tower — run once per catalog item (models.py: ItemTower)"]
+        TXT["Title + category text"] --> TE["Text encoder\n(Sentence-Transformer)"]
+        IMG["Product image"] --> IE["CLIP image encoder"]
+        ID["Item ID"] --> IDE["Learned ID embedding"]
+        TE --> FUSE["Multi-head attention fusion\n(image gated, starts near-zero)"]
+        IE --> FUSE
+        IDE --> FUSE
+        FUSE --> IV["Item vector\n256-dim, L2-normalized"]
+    end
+
+    IV --> FAISS[("FAISS index\nIndexFlatIP")]
+    UV --> FAISS
+    FAISS --> OUT["Top-K recommendations\n(history items excluded)"]
+```
+
 - **User tower**: input projection → learned positional embeddings (max
   history length 64) → a `nn.TransformerEncoder` (not a GRU, despite older
   documentation) → an MLP head down to 256-dim, L2-normalized.

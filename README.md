@@ -62,14 +62,36 @@ chance (0.2%).
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph user["User tower — run at request time (models.py: UserTower)"]
+        H["User history\n(sequence of item vectors)"] --> UT["Transformer encoder\n+ positional embeddings"]
+        UT --> UV["User vector\n256-dim, L2-normalized"]
+    end
+
+    subgraph item["Item tower — run once per catalog item (models.py: ItemTower)"]
+        TXT["Title + category text"] --> TE["Text encoder\n(Sentence-Transformer)"]
+        IMG["Product image"] --> IE["CLIP image encoder"]
+        ID["Item ID"] --> IDE["Learned ID embedding"]
+        TE --> FUSE["Multi-head attention fusion\n(image gated, starts near-zero)"]
+        IE --> FUSE
+        IDE --> FUSE
+        FUSE --> IV["Item vector\n256-dim, L2-normalized"]
+    end
+
+    IV --> FAISS[("FAISS index\nIndexFlatIP")]
+    UV --> FAISS
+    FAISS --> OUT["Top-K recommendations\n(history items excluded)"]
+```
+
 - **User tower:** transformer encoder (positional embeddings, multi-head
   self-attention) over interaction history → 256-dim vector.
 - **Item tower:** text projection + CLIP image projection (learned sigmoid
   gate, starts near-zero) + learned item-ID embedding, fused via multi-head
   attention across the three signals.
 - **Training:** temperature-scaled contrastive loss against a popularity
-  pool, AdamW + cosine annealing, early stopping.
-- **Retrieval:** FAISS `IndexFlatIP` nearest-neighbor search.
+  pool, AdamW + cosine annealing, early stopping (see `train.py`).
+- **Retrieval:** FAISS `IndexFlatIP` nearest-neighbor search (`retrieval.py`).
 
 ## Repository structure
 
