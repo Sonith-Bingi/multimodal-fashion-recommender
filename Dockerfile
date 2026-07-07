@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY ui ./ui
 
 # Serving only needs the already-trained model + FAISS index, not the
 # sentence-transformers/CLIP encoders used at training time -- the `ci`

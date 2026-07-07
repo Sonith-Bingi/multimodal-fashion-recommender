@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import Settings
@@ -18,6 +21,9 @@ configure_logging(logging.INFO)
 logger = logging.getLogger(__name__)
 
 _state: dict[str, Any] = {}
+
+# repo_root/ui -- a static demo frontend, separate from the API package.
+UI_DIR = Path(__file__).resolve().parents[2] / "ui"
 
 
 @asynccontextmanager
@@ -36,6 +42,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Public demo returning non-sensitive product data; permissive CORS lets the
+# static ui/ frontend be opened standalone (e.g. file://) and still call a
+# deployed API, not just when served same-origin.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+if UI_DIR.is_dir():
+    app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
 
 class RecommendRequest(BaseModel):
     history: list[str] = Field(
@@ -51,6 +70,7 @@ class Recommendation(BaseModel):
     item_index: int
     title: str
     categories: str
+    image_url: str = ""
     score: float
 
 
@@ -61,7 +81,7 @@ class RecommendResponse(BaseModel):
 
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
-    return RedirectResponse(url="/docs")
+    return RedirectResponse(url="/ui/" if UI_DIR.is_dir() else "/docs")
 
 
 @app.get("/health")

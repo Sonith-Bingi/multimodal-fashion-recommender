@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multimodal Fashion Recommender</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <h1>Multimodal Fashion Recommender</h1>
+    <p>
+      A two-tower sequence-aware recommender trained and evaluated on real
+      Amazon Fashion data. Build a shopping history below and see what the
+      model retrieves next.
+    </p>
+    <p class="links">
+      <a href="https://github.com/Sonith-Bingi/multimodal-fashion-recommender" target="_blank" rel="noopener">GitHub</a>
+      &middot;
+      <a href="https://github.com/Sonith-Bingi/multimodal-fashion-recommender/blob/main/MODEL_CARD.md" target="_blank" rel="noopener">Model card</a>
+      &middot;
+      <a href="/docs" target="_blank" rel="noopener">API reference</a>
+    </p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>1. Build a history</h2>
+      <p class="hint">Type a product name and press Enter, or click a suggestion.</p>
+
+      <div class="input-row">
+        <input
+          id="item-input"
+          type="text"
+          placeholder="e.g. Swim Trunk"
+          autocomplete="off"
+        />
+        <button id="add-btn" type="button">Add</button>
+      </div>
+
+      <div id="suggestions" class="chip-row suggestions"></div>
+
+      <div id="history" class="chip-row history" aria-live="polite"></div>
+
+      <div class="controls">
+        <label for="top-k">Recommendations:</label>
+        <select id="top-k">
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="8">8</option>
+          <option value="10">10</option>
+        </select>
+        <button id="recommend-btn" type="button" disabled>Get recommendations</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>2. Recommendations</h2>
+      <div id="status-line" class="status-line"></div>
+      <div id="results" class="results-grid"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p id="api-info"></p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

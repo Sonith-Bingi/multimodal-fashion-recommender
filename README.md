@@ -107,6 +107,7 @@ flowchart LR
 │   ├── train.py           # Training/eval/recommend orchestration
 │   ├── pipeline.py        # Public API re-export
 │   └── logging_utils.py, utils.py
+├── ui/                    # Static demo frontend (HTML/CSS/JS, no build step), served at /ui
 ├── scripts/               # train.py/evaluate.py entry points (equivalent to `reco train`/`evaluate`)
 ├── main.py                # Universal CLI entry point (equivalent to `reco`)
 ├── tests/                 # Fully offline synthetic-data fixture + integration tests
@@ -145,12 +146,19 @@ for rec in recommendations:
     print(rec)
 ```
 
-## Serving (FastAPI + Docker)
+## Serving (FastAPI + Docker + UI)
 
 ```bash
 pip install -e ".[api]"
 uvicorn recommender.api:app --host 0.0.0.0 --port 8000
 ```
+
+Then open `http://localhost:8000/` for the interactive demo UI (`ui/` — a
+static HTML/CSS/JS frontend, no build step): add a few products to a history,
+pick top-k, and see real recommendations with images and scores. This is
+exactly what's running on the [live demo](https://huggingface.co/spaces/htinos/multimodal-fashion-recommender).
+
+Or hit the API directly:
 
 ```bash
 curl -X POST http://localhost:8000/recommend \

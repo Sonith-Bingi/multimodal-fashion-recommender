@@ -878,6 +878,8 @@ def recommend_for_history(
         catalog["title"] = catalog.get("category_name", "").astype(str)
     if "categories" not in catalog.columns:
         catalog["categories"] = catalog.get("category_name", "").astype(str)
+    if "imgUrl" not in catalog.columns:
+        catalog["imgUrl"] = ""
 
     matched_indices: list[int] = []
     for query in history:
@@ -906,6 +908,7 @@ def recommend_for_history(
                 "item_index": idx,
                 "title": _clean_str(row.get("title", "")),
                 "categories": _clean_str(row.get("categories", "")),
+                "image_url": _clean_str(row.get("imgUrl", "")),
                 "score": score,
             }
         )
