@@ -1,8 +1,7 @@
 """Production pipeline public API."""
 
-from .production_pipeline import (
-    ArtifactStatus,
-    EvalMetrics,
+from .retrieval import ArtifactStatus, EvalMetrics
+from .train import (
     RecommenderPipeline,
     recommend_for_history,
     run_full_evaluation,
