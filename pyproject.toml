@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Two-tower fashion recommender tooling extracted from notebook workflow"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Patron" }]
+authors = [{ name = "Sonith-Bingi" }]
 dependencies = [
   "numpy>=1.26",
   "pandas>=2.1",
@@ -24,11 +24,26 @@ train = [
   "sentence-transformers>=3.0",
   "transformers>=4.40",
   "faiss-cpu>=1.8",
+  "huggingface_hub>=0.24",
+  "requests>=2.32",
+  "pillow>=10.4",
 ]
 dev = [
   "pytest>=8.2",
   "ruff>=0.6",
   "mypy>=1.10",
+]
+# Lightweight subset of `train` used in CI so the real two-tower model and
+# FAISS retrieval get exercised. Deliberately excludes sentence-transformers/
+# transformers, which would pull large pretrained weights over the network
+# on every run; embeddings fall back to the deterministic offline path instead.
+ci = [
+  "torch>=2.3",
+  "faiss-cpu>=1.8",
+]
+api = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]

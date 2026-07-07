@@ -1,151 +1,191 @@
-# multimodal-fashion-recommender
+# Multimodal Fashion Recommender
 
-This repository implements a production-ready, multimodal recommender system for Amazon Fashion products using a modern two-tower deep learning architecture. The system leverages both text and image features for each product, enabling richer and more accurate recommendations than unimodal approaches. The project is fully modularized for reproducibility, extensibility, and GitHub best practices.
+A two-tower sequence-aware recommender for Amazon Fashion, trained and
+evaluated on real Amazon Reviews 2023 data — not a toy dataset. A transformer
+user tower encodes purchase history; an attention-fused item tower combines
+text, image (CLIP), and learned ID embeddings. Served over a FastAPI +
+Docker deployment, live on Hugging Face Spaces.
 
-## Project Overview (Multimodal)
+**Live demo:** https://huggingface.co/spaces/htinos/multimodal-fashion-recommender
 
-**Goal:** Build a scalable recommender system that leverages both user interaction history and multimodal product features (text and images) to provide high-quality product recommendations. The multimodal approach fuses textual and visual information, allowing the model to understand products more holistically and deliver superior recommendations.
+```bash
+curl -X POST https://htinos-multimodal-fashion-recommender.hf.space/recommend \
+  -H "Content-Type: application/json" \
+  -d '{"history": ["Swim Trunk", "Sunglasses"], "top_k": 5}'
+```
 
-**Key Features (Multimodal):**
-- End-to-end pipeline: data loading, k-core filtering, multimodal embedding (text + image), model training, evaluation, and qualitative analysis
-- Two-tower neural architecture: user tower (GRU over history), item tower (fuses text and CLIP image features)
-- Multimodal product representation for richer, more robust recommendations
-- Modern Python packaging, CLI, config, and artifact validation
-- Example tests and diagnostics for model health
+**Full architecture, data, and results:** [MODEL_CARD.md](MODEL_CARD.md)
 
-## Pipeline Flow
+## Why this project is worth a look
 
-1. **Data Loading & Preprocessing**
-  - Download Amazon Fashion metadata and reviews
-  - Apply k-core filtering (default: k=3) to ensure dense user/item interactions
-  - Clean and structure product catalog
+Most portfolio recommenders stop at "here's an architecture and a metric."
+This one is built around a harder, more useful claim: **the architecture's
+added complexity earns its keep, and the numbers are honest.**
 
-2. **Item Embeddings (Multimodal: Text + Image)**
-  - Encode product titles and categories using Sentence Transformers (all-mpnet-base-v2)
-  - Extract visual features from product images using CLIP
-  - Fuse text and image features for each product to create a multimodal embedding
-  - Prepare item embedding matrix and tokenized text for model input
+- **Trained on real data, not synthetic.** Amazon Fashion 2023 via the
+  Hugging Face Hub, k-core filtered to a dense 5,015-item / 5,277-user
+  subset out of 2M+ raw users.
+- **Every architectural claim is backed by a controlled ablation, not
+  assumed.** Sequence-aware retrieval vs. a mean-pooling baseline; real
+  semantic embeddings vs. a deterministic fallback; real CLIP image
+  embeddings vs. none — each measured with identical seeds, identical
+  architecture, only one variable changed at a time. Result: the
+  transformer user tower beats mean-pooling by **+66% relative recall@10**
+  on real purchase sequences (and ties it on synthetic data with no genuine
+  sequential structure — the model doesn't help when there's nothing for it
+  to exploit, and the ablation shows that honestly instead of hiding it).
+- **A real bug changed the headline number by ~3x.** The evaluation
+  protocol was silently scoring ~49% of validation examples as guaranteed
+  failures (repeat-purchase targets that the retrieval design structurally
+  excludes) — full root cause and fix in the model card. Recall@10 went
+  from 0.056 to 0.17 once fixed. That's the kind of bug that's invisible
+  unless you actually run the full pipeline end-to-end on real data and
+  question your own numbers, not just something a tutorial teaches you to
+  check for.
+- **Reproducible.** Deterministic training (`torch.manual_seed`, seeded
+  DataLoader shuffling) — two independent runs on the same data produce
+  byte-identical metrics.
 
-3. **User Interaction Sequences**
-  - Build user histories from filtered events
-  - Split into train/validation/novelty sets for robust evaluation
+## Results
 
-4. **Model Architecture (Multimodal)**
-  - **User Tower:** GRU encodes user history into a dense vector
-  - **Item Tower:** Fuses text and image features for each product using a multimodal approach
-  - Contrastive loss with pop-pool negative sampling
+Real Amazon Fashion data, `dense_k=3`, evaluated on genuinely novel targets
+(see [MODEL_CARD.md](MODEL_CARD.md) for why that distinction matters):
 
-5. **Training & Evaluation (Multimodal)**
-  - Train with pop-pool contrastive objective on multimodal embeddings
-  - Evaluate with Recall@K, NDCG@K, and MRR on multiple validation splits
-  - Use FAISS for fast nearest-neighbor retrieval
+| metric | sequence tower | mean-pooling baseline |
+|---|---|---|
+| recall@10 | **0.1695** | 0.1020 |
+| ndcg@10 | **0.1132** | 0.0560 |
+| mrr@10 | **0.0961** | 0.0421 |
 
-6. **Qualitative & Interactive Analysis**
-  - Show example predictions and allow interactive playground for custom user histories
+Recall@10 of 17% against a 5,015-item catalog is ~85x better than random
+chance (0.2%).
 
-## Repository Structure (Multimodal)
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph user["User tower — run at request time (models.py: UserTower)"]
+        H["User history\n(sequence of item vectors)"] --> UT["Transformer encoder\n+ positional embeddings"]
+        UT --> UV["User vector\n256-dim, L2-normalized"]
+    end
+
+    subgraph item["Item tower — run once per catalog item (models.py: ItemTower)"]
+        TXT["Title + category text"] --> TE["Text encoder\n(Sentence-Transformer)"]
+        IMG["Product image"] --> IE["CLIP image encoder"]
+        ID["Item ID"] --> IDE["Learned ID embedding"]
+        TE --> FUSE["Multi-head attention fusion\n(image gated, starts near-zero)"]
+        IE --> FUSE
+        IDE --> FUSE
+        FUSE --> IV["Item vector\n256-dim, L2-normalized"]
+    end
+
+    IV --> FAISS[("FAISS index\nIndexFlatIP")]
+    UV --> FAISS
+    FAISS --> OUT["Top-K recommendations\n(history items excluded)"]
+```
+
+- **User tower:** transformer encoder (positional embeddings, multi-head
+  self-attention) over interaction history → 256-dim vector.
+- **Item tower:** text projection + CLIP image projection (learned sigmoid
+  gate, starts near-zero) + learned item-ID embedding, fused via multi-head
+  attention across the three signals.
+- **Training:** temperature-scaled contrastive loss against a popularity
+  pool, AdamW + cosine annealing, early stopping (see `train.py`).
+- **Retrieval:** FAISS `IndexFlatIP` nearest-neighbor search (`retrieval.py`).
+
+## Repository structure
 
 ```text
 .
-├── scripts/
-│   ├── train.py               # CLI entry: training
-│   └── evaluate.py            # CLI entry: evaluation
-├── src/
-│   └── recommender/
-│       ├── __init__.py
-│       ├── cli.py             # CLI logic
-│       ├── config.py          # Pydantic config
-│       ├── logging_utils.py   # Logging setup
-│       ├── pipeline.py        # Public API wrapper
-│       ├── production_pipeline.py # Production train/eval/recommend logic
-│       └── utils.py           # Utilities
-├── tests/
-│   └── test_config.py         # Example unit tests
-├── .github/workflows/ci.yml   # GitHub Actions CI
-├── pyproject.toml             # Packaging, dependencies
-├── requirements.txt           # Pinned requirements
-├── .env.example               # Example environment config
-├── Makefile                   # Dev commands
-├── .pre-commit-config.yaml    # Lint/format hooks
-├── LICENSE                    # MIT License
-└── README.md                  # This file
+├── src/recommender/
+│   ├── api.py          # FastAPI serving layer (/health, /status, /recommend)
+│   ├── cli.py           # `reco` CLI (check, summary, train, evaluate)
+│   ├── config.py        # Pydantic settings
+│   ├── data.py           # Data download, k-core filtering, sequence construction
+│   ├── models.py         # Two-tower architecture (user/item towers)
+│   ├── retrieval.py       # FAISS retrieval + ranking metrics
+│   ├── train.py           # Training/eval/recommend orchestration
+│   ├── pipeline.py        # Public API re-export
+│   └── logging_utils.py, utils.py
+├── ui/                    # Static demo frontend (HTML/CSS/JS, no build step), served at /ui
+├── scripts/               # train.py/evaluate.py entry points (equivalent to `reco train`/`evaluate`)
+├── main.py                # Universal CLI entry point (equivalent to `reco`)
+├── tests/                 # Fully offline synthetic-data fixture + integration tests
+├── .github/workflows/ci.yml  # Lint + tests, including the real two-tower model + FAISS
+├── Dockerfile, docker-compose.yml, Makefile
+├── MODEL_CARD.md          # Architecture, data, training, results, limitations
+└── pyproject.toml
 ```
 
-
-## How to Run 
-You can run the full multimodal pipeline and all major steps from the command line using the provided Python scripts and CLI:
-
-**Universal entry point:**
+## Quickstart
 
 ```bash
-python main.py <command>
-# where <command> is one of: check, summary, train, evaluate
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,ci]"        # add [train] instead of [ci] for real
+                                    # sentence-transformers/CLIP encoders
+cp .env.example .env               # optional: point RECO_DRIVE_DIR at your data
+reco check                          # validate artifacts
+pytest                               # fully offline, ~10s
 ```
 
-Or use the CLI directly:
+Training needs `meta_Amazon_Fashion.jsonl` and `Amazon_Fashion.jsonl` from
+[McAuley-Lab/Amazon-Reviews-2023](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023)
+in `RECO_DRIVE_DIR` (auto-downloaded via the Hub if missing and `huggingface_hub`
+is installed):
 
 ```bash
-reco check
-reco summary
 reco train
 reco evaluate
 ```
 
+```python
+from recommender.pipeline import recommend_for_history
 
-All major steps (artifact check, summary, training, evaluation) are available via main.py. This is the recommended way to run the project for reproducibility and automation.
+recommendations = recommend_for_history(["Swim Trunk", "Sunglasses", "Flip Flop"])
+for rec in recommendations:
+    print(rec)
+```
 
-## Quickstart
+## Serving (FastAPI + Docker + UI)
 
-1. **Create environment and install:**
-  ```bash
-  python -m venv .venv
-  source .venv/bin/activate
-  pip install -U pip
-  pip install -e .[dev]
-  ```
+```bash
+pip install -e ".[api]"
+uvicorn recommender.api:app --host 0.0.0.0 --port 8000
+```
 
-2. **Optional: set up environment variables**
-  ```bash
-  cp .env.example .env
-  ```
+Then open `http://localhost:8000/` for the interactive demo UI (`ui/` — a
+static HTML/CSS/JS frontend, no build step): add a few products to a history,
+pick top-k, and see real recommendations with images and scores. This is
+exactly what's running on the [live demo](https://huggingface.co/spaces/htinos/multimodal-fashion-recommender).
 
-3. **Run checks and tests:**
-  ```bash
-  reco check
-  reco summary
-  pytest
-  ```
+Or hit the API directly:
 
+```bash
+curl -X POST http://localhost:8000/recommend \
+  -H "Content-Type: application/json" \
+  -d '{"history": ["Swim Trunk", "Sunglasses", "Flip Flop"], "top_k": 5}'
+```
+
+Or containerized, mounting your data/artifacts directory:
+
+```bash
+docker compose up --build
+```
+
+`GET /health` is a liveness check; `GET /status` reports which trained
+artifacts are present; `POST /recommend` returns 503 (rather than silently
+kicking off a multi-minute training run) if the model hasn't been trained yet.
 
 ## Notes
 
-- Default settings: `DENSE_K = 3`, `SEQ_LEN = 15`
-- Artifact checks expect these files in repo root:
-  - `item_index_v11.faiss` (multimodal index)
-  - `item_tower_vecs_v11.npy` (multimodal item vectors)
+- Default settings: `DENSE_K=3`, `SEQ_LEN=15`. Data and artifacts default to
+  `<repo_root>/data` (override with `RECO_DRIVE_DIR`).
+- If you install the `train` extra and see the process abort during
+  training/evaluation with an OpenMP error, it's a known conflict between
+  the OpenMP runtimes bundled in `torch` and `faiss-cpu`. Already worked
+  around internally via `KMP_DUPLICATE_LIB_OK`; set it yourself in the
+  unlikely case you still hit it.
 
+## License
 
-
-## Example Usage
-
-You can use the recommender system programmatically in Python to get recommendations for a custom user history. For example:
-
-```python
-from src.recommender.pipeline import recommend_for_history
-
-my_history = ["Swim Trunk", "Sunglasses", "Flip Flop"]
-recommendations = recommend_for_history(my_history)
-for rec in recommendations:
-  print(rec)
-```
-
-Replace `my_history` with any list of product names or IDs representing a user's interaction history. The function `recommend_for_history` should return the top recommended products for the given history.
-
-You can also run the main pipeline steps using the provided scripts or CLI commands.
-
-
-## Repository Name
-
-**GitHub:** [Sonith-Bingi/multimodal-fashion-recommender](https://github.com/Sonith-Bingi/multimodal-fashion-recommender)
-
-
+MIT — see [LICENSE](LICENSE).

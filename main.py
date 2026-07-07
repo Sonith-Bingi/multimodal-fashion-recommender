@@ -13,11 +13,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from recommender.cli import main as cli_main
+from recommender.cli import main as cli_main  # noqa: E402
 
 
-
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Multimodal Fashion Recommender: Universal Entry Point"
     )
@@ -28,8 +27,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Dispatch to CLI logic (already implemented in src/recommender/cli.py)
-    cli_main([args.command])
+    return cli_main([args.command])
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
