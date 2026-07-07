@@ -8,7 +8,7 @@ This repository implements a production-ready, multimodal recommender system for
 
 **Key Features (Multimodal):**
 - End-to-end pipeline: data loading, k-core filtering, multimodal embedding (text + image), model training, evaluation, and qualitative analysis
-- Two-tower neural architecture: user tower (GRU over history), item tower (fuses text and CLIP image features)
+- Two-tower neural architecture: user tower (transformer encoder over history), item tower (fuses text and CLIP image features)
 - Multimodal product representation for richer, more robust recommendations
 - Modern Python packaging, CLI, config, and artifact validation
 - Example tests and diagnostics for model health
@@ -31,7 +31,7 @@ This repository implements a production-ready, multimodal recommender system for
   - Split into train/validation/novelty sets for robust evaluation
 
 4. **Model Architecture (Multimodal)**
-  - **User Tower:** GRU encodes user history into a dense vector
+  - **User Tower:** Transformer encoder over user history into a dense vector
   - **Item Tower:** Fuses text and image features for each product using a multimodal approach
   - Contrastive loss with pop-pool negative sampling
 
@@ -148,6 +148,13 @@ Replace `my_history` with any list of product names or IDs representing a user's
 
 You can also run the main pipeline steps using the provided scripts or CLI commands.
 
+
+## Model Card
+
+See [MODEL_CARD.md](MODEL_CARD.md) for architecture details, real-data
+training/evaluation results (Recall@10/NDCG@10/MRR@10), ablation studies
+(sequence-aware vs. mean-pooling retrieval, real vs. fallback embeddings,
+CLIP image embeddings), and known limitations.
 
 ## Repository Name
 
