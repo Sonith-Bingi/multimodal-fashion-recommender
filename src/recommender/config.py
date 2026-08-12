@@ -43,7 +43,17 @@ class Settings(BaseSettings):
 
     @property
     def item_embs_path(self) -> Path:
-        return self.drive_dir / f"item_embs_mpnet_kcore{self.dense_k}.npy"
+        # patrickjohncyh/fashion-clip: once a real eval-methodology bug in
+        # this project's own testing scripts was fixed (see MODEL_CARD.md
+        # "Resolution: the gap was a testing bug, not a model bug"), this
+        # fashion-tuned CLIP checkpoint measured a genuine +7.7% recall@10
+        # improvement over all-mpnet-base-v2 on this pipeline's downstream
+        # task -- narrowly ahead of Marqo/marqo-fashionCLIP too, with a
+        # simpler, more reliable integration (standard transformers API,
+        # no open_clip/trust_remote_code fragility). Filename carries the
+        # encoder name so a future switch can't silently load stale,
+        # mismatched cached embeddings.
+        return self.drive_dir / f"item_embs_fashionclip_kcore{self.dense_k}.npy"
 
     @property
     def artifacts_dir(self) -> Path:
@@ -56,3 +66,7 @@ class Settings(BaseSettings):
     @property
     def vectors_path(self) -> Path:
         return self.drive_dir / "item_tower_vecs_v11.npy"
+
+    @property
+    def popular_items_path(self) -> Path:
+        return self.drive_dir / f"popular_items_kcore{self.dense_k}.json"

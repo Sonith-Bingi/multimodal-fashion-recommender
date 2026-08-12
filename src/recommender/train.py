@@ -15,15 +15,31 @@ import numpy as np
 import pandas as pd
 
 from .config import Settings
-from .data import _build_sequences, _download_from_hub, _filter_k_core, _token_fallback_embedding
-from .models import IMG_DIM, TRAINING_ONLY_STATE_KEYS, _build_torch_model, _try_import_torch
+from .data import (
+    _build_sequences,
+    _download_from_hub,
+    _filter_k_core,
+    _hash_brand,
+    _token_fallback_embedding,
+)
+from .models import (
+    IMG_DIM,
+    TEXT_EMB_DIM,
+    TRAINING_ONLY_STATE_KEYS,
+    _build_torch_model,
+    _select_device,
+    _try_import_torch,
+)
 from .retrieval import (
     ArtifactStatus,
     EvalMetrics,
+    _diversify_beyond_history,
+    _mmr_rerank,
     _mrr_at_k,
     _ndcg_at_k,
     _normalize_rows,
     _recall_at_k,
+    _reciprocal_rank_fusion,
     _try_import_faiss,
 )
 from .utils import ensure_dir
@@ -37,6 +53,21 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 logger = logging.getLogger(__name__)
 
+# patrickjohncyh/fashion-clip: a CLIP ViT-B/32 checkpoint domain-adapted on
+# fashion image-text pairs. One model for both text and image in a single
+# joint space. This project tried mpnet+generic-CLIP, this fashion-tuned
+# CLIP, and Marqo/marqo-fashionCLIP; an eval-methodology bug in this
+# project's own testing scripts (evaluating with use_hybrid=True instead of
+# the real default False) initially made both fashion-tuned encoders look
+# like regressions. Once fixed, patrickjohncyh/fashion-clip measured a real
+# +7.7% recall@10 improvement over mpnet+openai-clip, narrowly ahead of
+# Marqo-fashionCLIP too, with a simpler and more reliable integration
+# (standard transformers API; Marqo's requires open_clip and hit a
+# trust_remote_code/meta-tensor incompatibility with current transformers).
+# See MODEL_CARD.md "Resolution: the gap was a testing bug, not a model
+# bug" for the full story and numbers.
+_FASHION_CLIP_MODEL_ID = "patrickjohncyh/fashion-clip"
+
 
 class RecommenderPipeline:
     """Production pipeline extracted into source modules."""
@@ -44,12 +75,15 @@ class RecommenderPipeline:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._inference_runtime: dict[str, Any] | None = None
+        self._text_encoder: Any | None = None
 
     def _two_tower_state_path(self) -> Path:
         return self.settings.artifacts_dir / "two_tower_model.pt"
 
     def _clip_img_emb_path(self, top_n: int) -> Path:
-        name = f"train_target_img_embs_clip_kcore{self.settings.dense_k}_top{top_n}.npy"
+        # "fashionclip": see item_embs_path in config.py for why the
+        # encoder name is baked into the cache filename.
+        name = f"train_target_img_embs_fashionclip_kcore{self.settings.dense_k}_top{top_n}.npy"
         return self.settings.drive_dir / name
 
     def validate_artifacts(self) -> ArtifactStatus:
@@ -196,6 +230,82 @@ class RecommenderPipeline:
         self._save_dense_events_cache(user_events)
         return fashion_products, user_events, raw_backup
 
+    def _load_text_encoder(self) -> Any:
+        """Cached loader for the shared fashion-clip model/processor so a
+        live API request doesn't reload weights on every call, and so the
+        image-embedding builder below can reuse the same loaded model
+        instead of instantiating a second copy. Mirrors the
+        _inference_runtime caching pattern used for the two-tower model.
+        Returns the string "fallback" (rather than None) when the real
+        encoder is unavailable, so callers can cache that outcome too."""
+        if self._text_encoder is not None:
+            return self._text_encoder
+        try:
+            from transformers import CLIPModel, CLIPProcessor
+
+            torch_ctx = _try_import_torch()
+            if torch_ctx is None:
+                raise RuntimeError("torch unavailable")
+            torch = torch_ctx["torch"]
+            device = _select_device(torch)
+            model = CLIPModel.from_pretrained(_FASHION_CLIP_MODEL_ID).to(device)
+            model.eval()
+            processor = CLIPProcessor.from_pretrained(_FASHION_CLIP_MODEL_ID)
+            self._text_encoder = {
+                "torch": torch,
+                "model": model,
+                "processor": processor,
+                "device": device,
+            }
+        except Exception as exc:
+            logger.warning("fashion-clip unavailable, using fallback text encoder: %s", exc)
+            self._text_encoder = "fallback"
+        return self._text_encoder
+
+    def _encode_texts(self, texts: list[str]) -> np.ndarray:
+        """Single text-encoding path shared by catalog embedding (offline)
+        and live query encoding (online) so both live in the same space --
+        required for the semantic history-matching fallback in
+        recommend_for_history() to be meaningful."""
+        encoder = self._load_text_encoder()
+        if encoder == "fallback":
+            return np.stack(
+                [_token_fallback_embedding(t, dim=TEXT_EMB_DIM) for t in texts], axis=0
+            )
+
+        torch = encoder["torch"]
+        model = encoder["model"]
+        processor = encoder["processor"]
+        device = encoder["device"]
+
+        all_embs: list[np.ndarray] = []
+        batch_size = 128
+        with torch.no_grad():
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i : i + batch_size]
+                inputs = processor(
+                    text=batch,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    # CLIP's tokenizer doesn't reliably infer this checkpoint's
+                    # 77-token position-embedding limit from truncation=True
+                    # alone -- long "title [category]" strings without this
+                    # raise "Sequence length must be less than
+                    # max_position_embeddings" instead of silently truncating.
+                    max_length=77,
+                ).to(device)
+                feats = model.get_text_features(**inputs)
+                # transformers >= 5.x returns BaseModelOutputWithPooling (with
+                # .pooler_output holding the projected embedding) instead of a
+                # plain tensor -- same API shift the image-embedding code
+                # below already guards against.
+                if not isinstance(feats, torch.Tensor):
+                    feats = feats.pooler_output
+                feats = torch.nn.functional.normalize(feats, dim=-1)
+                all_embs.append(feats.cpu().float().numpy())
+        return np.concatenate(all_embs, axis=0).astype(np.float32)
+
     def _build_item_embeddings(self, fashion_products: pd.DataFrame) -> np.ndarray:
         if self.settings.item_embs_path.exists():
             arr = np.load(self.settings.item_embs_path).astype(np.float32)
@@ -203,23 +313,7 @@ class RecommenderPipeline:
                 return arr
 
         texts = fashion_products["text"].fillna("").astype(str).tolist()
-
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
-            item_embs = model.encode(
-                texts,
-                batch_size=128,
-                show_progress_bar=True,
-                normalize_embeddings=True,
-            )
-            item_embs = np.array(item_embs, dtype=np.float32)
-        except Exception as exc:
-            logger.warning(
-                "sentence-transformers unavailable, using fallback text encoder: %s", exc
-            )
-            item_embs = np.stack([_token_fallback_embedding(t) for t in texts], axis=0)
+        item_embs = self._encode_texts(texts)
 
         np.save(self.settings.item_embs_path, item_embs)
         return item_embs
@@ -231,6 +325,7 @@ class RecommenderPipeline:
         item_embs_with_pad: np.ndarray,
         img_embs_with_pad: np.ndarray,
         popular_items: np.ndarray,
+        train_time_buckets: list[list[int]] | None = None,
     ) -> tuple[Any, Any, dict[int, int]] | None:
         torch_ctx = _try_import_torch()
         if torch_ctx is None:
@@ -242,43 +337,68 @@ class RecommenderPipeline:
 
         pop_pos_lookup = {int(idx): pos for pos, idx in enumerate(popular_items.tolist())}
         pop_train_seqs = list(train_seqs)
+        if train_time_buckets is None:
+            pop_train_time_buckets = [[0] * len(h) for h, _ in pop_train_seqs]
+        else:
+            pop_train_time_buckets = list(train_time_buckets)
         pop_val_seqs = [(h, t) for h, t in val_seqs if t in pop_pos_lookup]
+        # Validation deliberately gets no real time-gap info (all "unknown"
+        # bucket 0), mirroring recommend_for_history()'s serving API, which
+        # never has real timestamps either -- see _time_gap_bucket in
+        # data.py and MODEL_CARD.md.
+        pop_val_time_buckets = [[0] * len(h) for h, _ in pop_val_seqs]
 
         item_embs_t = torch.tensor(item_embs_with_pad, dtype=torch.float32)
         img_embs_t = torch.tensor(img_embs_with_pad, dtype=torch.float32)
 
         class InteractionDataset(Dataset):
-            def __init__(self, seqs: list[tuple[list[int], int]]) -> None:
+            def __init__(
+                self, seqs: list[tuple[list[int], int]], time_buckets: list[list[int]]
+            ) -> None:
                 self.seqs = seqs
+                self.time_buckets = time_buckets
 
             def __len__(self) -> int:
                 return len(self.seqs)
 
-            def __getitem__(self, index: int) -> tuple[list[int], int]:
-                return self.seqs[index]
+            def __getitem__(self, index: int) -> tuple[list[int], int, list[int]]:
+                hist, target = self.seqs[index]
+                return hist, target, self.time_buckets[index]
 
-        def collate_fn(batch: list[tuple[list[int], int]]) -> tuple[Any, Any, Any, Any, Any, Any]:
-            hists, targets = zip(*batch, strict=True)
+        def collate_fn(
+            batch: list[tuple[list[int], int, list[int]]],
+        ) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+            hists, targets, time_buckets = zip(*batch, strict=True)
             max_len = max(len(h) for h in hists)
-            padded, masks = [], []
-            for hist in hists:
+            padded, masks, tb_padded = [], [], []
+            for hist, tb in zip(hists, time_buckets, strict=True):
                 pad = max_len - len(hist)
                 padded.append(list(hist) + [0] * pad)
                 masks.append([False] * len(hist) + [True] * pad)
+                tb_padded.append(list(tb) + [0] * pad)
 
             hist_idx = torch.tensor(padded, dtype=torch.long)
             hist_mask = torch.tensor(masks, dtype=torch.bool)
+            hist_time_buckets = torch.tensor(tb_padded, dtype=torch.long)
             tgt_idx = torch.tensor(list(targets), dtype=torch.long)
 
             hist_embs = item_embs_t[hist_idx]
             tgt_embs = item_embs_t[tgt_idx]
             tgt_img_embs = img_embs_t[tgt_idx]
-            return hist_embs, hist_mask, tgt_embs, tgt_img_embs, tgt_idx, hist_idx
+            return (
+                hist_embs,
+                hist_mask,
+                tgt_embs,
+                tgt_img_embs,
+                tgt_idx,
+                hist_idx,
+                hist_time_buckets,
+            )
 
         shuffle_generator = torch.Generator()
         shuffle_generator.manual_seed(self.settings.random_seed)
         train_dl = DataLoader(
-            InteractionDataset(pop_train_seqs),
+            InteractionDataset(pop_train_seqs, pop_train_time_buckets),
             batch_size=self.settings.batch_size,
             shuffle=True,
             collate_fn=collate_fn,
@@ -287,7 +407,7 @@ class RecommenderPipeline:
             generator=shuffle_generator,
         )
         val_dl = DataLoader(
-            InteractionDataset(pop_val_seqs),
+            InteractionDataset(pop_val_seqs, pop_val_time_buckets),
             batch_size=self.settings.batch_size,
             shuffle=False,
             collate_fn=collate_fn,
@@ -324,12 +444,18 @@ class RecommenderPipeline:
                 clip_img_embs = None
 
         if clip_img_embs is None:
+            # Reuses the same loaded fashion-clip model as _encode_texts()
+            # -- one model, one joint embedding space for text and image.
+            encoder = self._load_text_encoder()
+            if encoder == "fallback":
+                logger.warning("fashion-clip unavailable, using text-only items (no image signal)")
+                return img_embs_with_pad
+
             try:
                 from concurrent.futures import ThreadPoolExecutor
 
                 import requests
                 from PIL import Image
-                from transformers import CLIPModel, CLIPProcessor
 
                 clip_img_urls = fashion_products.iloc[clip_item_ids]["imgUrl"].fillna("").tolist()
 
@@ -352,16 +478,10 @@ class RecommenderPipeline:
                         if img is not None:
                             images[pos] = img
 
-                torch_ctx = _try_import_torch()
-                if torch_ctx is None:
-                    return img_embs_with_pad
-                torch = torch_ctx["torch"]
-                F = torch_ctx["F"]
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-
-                clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-                clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-                clip_model.eval()
+                torch = encoder["torch"]
+                clip_model = encoder["model"]
+                clip_processor = encoder["processor"]
+                device = encoder["device"]
 
                 clip_img_embs = np.zeros((len(clip_item_ids), IMG_DIM), dtype=np.float32)
                 clip_batch = 64
@@ -372,9 +492,12 @@ class RecommenderPipeline:
                     with torch.no_grad():
                         inputs = clip_processor(images=batch_imgs, return_tensors="pt").to(device)
                         feats = clip_model.get_image_features(pixel_values=inputs["pixel_values"])
+                        # transformers >= 5.x returns BaseModelOutputWithPooling
+                        # (with .pooler_output holding the projected embedding)
+                        # instead of a plain tensor.
                         if not isinstance(feats, torch.Tensor):
                             feats = feats.pooler_output
-                        feats = F.normalize(feats, dim=-1).cpu().float().numpy()
+                        feats = torch.nn.functional.normalize(feats, dim=-1).cpu().float().numpy()
                     for j, pos in enumerate(batch_pos):
                         clip_img_embs[pos] = feats[j]
 
@@ -387,12 +510,52 @@ class RecommenderPipeline:
             img_embs_with_pad[clip_item_ids] = clip_img_embs
         return img_embs_with_pad
 
+    def _build_price_brand_arrays(
+        self, fashion_products: pd.DataFrame
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Price and brand/store are already parsed by prepare_data() but
+        were never fed into the model -- real signal being discarded.
+        Price: log1p then z-scored against this catalog's own distribution
+        (encode_item() only ever runs at training/index-build time against a
+        fixed, fully-known catalog, never per live request, so there's no
+        train/serve skew risk in computing these stats fresh each run).
+        Brand/store: feature-hashed into a fixed embedding vocab (see
+        BRAND_HASH_BUCKETS in data.py) rather than one row per distinct
+        brand string, which would mostly be untrained noise for the many
+        brands seen only once or twice."""
+        price_raw = pd.to_numeric(
+            fashion_products["price"] if "price" in fashion_products.columns else 0.0,
+            errors="coerce",
+        )
+        price_raw = price_raw.fillna(0.0) if hasattr(price_raw, "fillna") else pd.Series(
+            [0.0] * len(fashion_products)
+        )
+        log_price = np.log1p(price_raw.to_numpy(dtype=np.float64)).astype(np.float32)
+        mean, std = float(log_price.mean()), float(log_price.std())
+        price_arr = (log_price - mean) / std if std > 1e-6 else np.zeros_like(log_price)
+
+        if "store" in fashion_products.columns:
+            brands = fashion_products["store"].fillna("").astype(str)
+        else:
+            brands = pd.Series([""] * len(fashion_products))
+        brand_arr = np.array(
+            [_hash_brand(b) if b else 0 for b in brands.tolist()], dtype=np.int64
+        )
+
+        return price_arr.astype(np.float32), brand_arr
+
     def _train_two_tower_item_vectors(
         self,
         item_embs: np.ndarray,
         train_seqs: list[tuple[list[int], int]],
         val_seqs: list[tuple[list[int], int]],
         popular_items: np.ndarray,
+        logq_alpha: float = 0.0,
+        id_branch_dropout: float = 0.0,
+        neg_sample_size: int | None = None,
+        train_time_buckets: list[list[int]] | None = None,
+        time_aware: bool = False,
+        use_price_brand: bool = False,
     ) -> np.ndarray:
         torch_ctx = _try_import_torch()
         if torch_ctx is None:
@@ -403,8 +566,25 @@ class RecommenderPipeline:
         nn = torch_ctx["nn"]
         F = torch_ctx["F"]
 
+        # Both default False: time-aware position encoding and price/brand
+        # fusion are validated-and-available, not validated-and-adopted --
+        # single-run real-data testing showed them flat-to-negative on
+        # recall@10 (see MODEL_CARD.md "Text / image encoder ablation" and
+        # its follow-up), which given this project's own "single run per
+        # condition, not statistically bulletproof" caveat could easily be
+        # torch.manual_seed() RNG-cascade noise rather than a real effect --
+        # multi-seed variance estimation is needed before trusting either
+        # direction, so the safe default keeps the exact validated
+        # architecture. Opt in explicitly once that's done.
+        if not time_aware:
+            train_time_buckets = None
+
         model_defs = _build_torch_model(
-            emb_dim=item_embs.shape[1], num_catalog_items=len(item_embs) + 1
+            emb_dim=item_embs.shape[1],
+            num_catalog_items=len(item_embs) + 1,
+            id_branch_dropout=id_branch_dropout,
+            use_time_aware=time_aware,
+            use_price_brand=use_price_brand,
         )
         if model_defs is None:
             return _normalize_rows(item_embs.astype(np.float32))
@@ -416,14 +596,22 @@ class RecommenderPipeline:
             axis=0,
         )
 
+        fashion_products = (
+            pd.read_csv(self.settings.catalog_cache_path)
+            if self.settings.catalog_cache_path.exists()
+            else self._load_fallback_catalog()
+        )
+
         # Notebook Phase 5.5 logic: CLIP embeddings on capped train-target subset
         img_embs_with_pad = self._build_clip_image_embeddings(
-            fashion_products=pd.read_csv(self.settings.catalog_cache_path)
-            if self.settings.catalog_cache_path.exists()
-            else self._load_fallback_catalog(),
+            fashion_products=fashion_products,
             train_seqs=train_seqs,
             n_items=len(item_embs),
         )
+
+        price_arr, brand_arr = self._build_price_brand_arrays(fashion_products)
+        price_with_pad = np.concatenate([price_arr, np.zeros(1, dtype=np.float32)], axis=0)
+        brand_with_pad = np.concatenate([brand_arr, np.zeros(1, dtype=np.int64)], axis=0)
 
         loaders = self._build_interaction_dataloaders(
             train_seqs=train_seqs,
@@ -431,25 +619,43 @@ class RecommenderPipeline:
             item_embs_with_pad=item_embs_with_pad,
             img_embs_with_pad=img_embs_with_pad,
             popular_items=popular_items,
+            train_time_buckets=train_time_buckets,
         )
         if loaders is None:
             return _normalize_rows(item_embs.astype(np.float32))
         train_dl, val_dl, pop_pos_lookup = loaders
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = _select_device(torch)
 
         # Fixes weight init + dropout masks so runs are comparable/reproducible;
         # DataLoader shuffling is separately seeded in _build_interaction_dataloaders.
         torch.manual_seed(self.settings.random_seed)
 
-        model = TwoTowerModel().to(device)
+        model = TwoTowerModel(logq_alpha=logq_alpha, neg_sample_size=neg_sample_size).to(device)
         popular_idxs = torch.tensor(popular_items, dtype=torch.long)
         item_embs_t = torch.tensor(item_embs_with_pad, dtype=torch.float32)
         img_embs_t = torch.tensor(img_embs_with_pad, dtype=torch.float32)
+        price_t = torch.tensor(price_with_pad, dtype=torch.float32)
+        brand_t = torch.tensor(brand_with_pad, dtype=torch.long)
+
+        # Empirical training-target frequency (raw counts) per pool item, for
+        # the logQ popularity-bias correction (see TwoTowerModel.forward()).
+        # Every pool item appeared as a training target at least once by
+        # construction (popular_items == train_target_items), so counts are
+        # always >= 1; the `.get(..., 1)` fallback is defensive only.
+        target_counts = Counter(t for _, t in train_seqs)
+        pop_freq = torch.tensor(
+            [float(target_counts.get(int(idx), 1)) for idx in popular_items],
+            dtype=torch.float32,
+        )
+
         model.register_popular_pool(
             text_embs=item_embs_t[popular_idxs],
             img_embs=img_embs_t[popular_idxs],
             pool_ids=popular_idxs,
+            pop_freq=pop_freq,
+            price=price_t[popular_idxs],
+            brand_id=brand_t[popular_idxs],
         )
         model.to(device)
 
@@ -475,11 +681,20 @@ class RecommenderPipeline:
             total_loss, n_items = 0.0, 0
 
             with torch.set_grad_enabled(train):
-                for hist_embs, hist_mask, _tgt_embs, _tgt_img_embs, tgt_idx, hist_idx in loader:
+                for (
+                    hist_embs,
+                    hist_mask,
+                    _tgt_embs,
+                    _tgt_img_embs,
+                    tgt_idx,
+                    hist_idx,
+                    hist_time_buckets,
+                ) in loader:
                     hist_embs = hist_embs.to(device)
                     hist_mask = hist_mask.to(device)
                     hist_idx = hist_idx.to(device)
                     tgt_idx = tgt_idx.to(device)
+                    hist_time_buckets = hist_time_buckets.to(device)
 
                     lookup = item_to_pop_pos.to(hist_idx.device)
                     hist_pos = lookup[hist_idx]
@@ -487,7 +702,13 @@ class RecommenderPipeline:
                     hist_pos = hist_pos.masked_fill(hist_mask, -1)
 
                     with torch.cuda.amp.autocast(enabled=(device == "cuda")):
-                        loss = model(hist_embs, hist_mask, tgt_pos, hist_pos=hist_pos)
+                        loss = model(
+                            hist_embs,
+                            hist_mask,
+                            tgt_pos,
+                            hist_pos=hist_pos,
+                            hist_time_buckets=hist_time_buckets,
+                        )
 
                     if not torch.isfinite(loss):
                         continue
@@ -545,9 +766,13 @@ class RecommenderPipeline:
                 end_i = i + text_chunk.size(0)
                 img_chunk = img_embs_t[i:end_i].to(device)
                 id_chunk = torch.arange(i, end_i, dtype=torch.long, device=device)
+                price_chunk = price_t[i:end_i].to(device)
+                brand_chunk = brand_t[i:end_i].to(device)
 
                 with torch.cuda.amp.autocast(enabled=(device == "cuda")):
-                    raw_vecs = model.encode_item(text_chunk, img_chunk, id_chunk)
+                    raw_vecs = model.encode_item(
+                        text_chunk, img_chunk, id_chunk, price_chunk, brand_chunk
+                    )
 
                 all_item_vecs.append(F.normalize(raw_vecs.float(), dim=-1).cpu())
 
@@ -589,7 +814,7 @@ class RecommenderPipeline:
             return None
 
         _item_cls, _user_cls, TwoTowerModel = model_defs
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = _select_device(torch)
         model = TwoTowerModel().to(device)
 
         try:
@@ -649,24 +874,39 @@ class RecommenderPipeline:
             "artifact_status": status.__dict__,
         }
 
-    def train(self) -> dict[str, object]:
+    def train(
+        self,
+        logq_alpha: float = 0.0,
+        id_branch_dropout: float = 0.1,
+        neg_sample_size: int | None = None,
+        time_aware: bool = False,
+        use_price_brand: bool = False,
+    ) -> dict[str, object]:
         fashion_products, user_events, raw_backup = self.prepare_data()
         item_embs = self._build_item_embeddings(fashion_products)
         item_embs = _normalize_rows(item_embs.astype(np.float32))
 
         asins = fashion_products["asin"].astype(str).tolist()
         asin_to_idx = {a: i for i, a in enumerate(asins)}
-        train_seqs, val_seqs, val_novel_seqs, sparse_val_seqs = _build_sequences(
-            user_events=user_events,
-            raw_user_events_backup=raw_backup,
-            asin_to_idx=asin_to_idx,
-            seq_len=self.settings.seq_len,
-            min_seq=self.settings.min_seq,
-            n_catalog=len(fashion_products),
+        train_seqs, val_seqs, val_novel_seqs, sparse_val_seqs, train_time_buckets = (
+            _build_sequences(
+                user_events=user_events,
+                raw_user_events_backup=raw_backup,
+                asin_to_idx=asin_to_idx,
+                seq_len=self.settings.seq_len,
+                min_seq=self.settings.min_seq,
+                n_catalog=len(fashion_products),
+            )
         )
 
         train_target_items = np.array(sorted({t for _, t in train_seqs}), dtype=np.int64)
         popular_items = train_target_items
+
+        target_freq = Counter(t for _, t in train_seqs)
+        popularity_ranking = [idx for idx, _ in target_freq.most_common()]
+        self.settings.popular_items_path.write_text(
+            json.dumps(popularity_ranking), encoding="utf-8"
+        )
 
         if len(popular_items) > 0 and len(train_seqs) > 0:
             all_item_vecs = self._train_two_tower_item_vectors(
@@ -674,6 +914,12 @@ class RecommenderPipeline:
                 train_seqs=train_seqs,
                 val_seqs=val_seqs,
                 popular_items=popular_items,
+                logq_alpha=logq_alpha,
+                id_branch_dropout=id_branch_dropout,
+                neg_sample_size=neg_sample_size,
+                train_time_buckets=train_time_buckets,
+                time_aware=time_aware,
+                use_price_brand=use_price_brand,
             )
         else:
             all_item_vecs = item_embs
@@ -727,31 +973,38 @@ class RecommenderPipeline:
             q = vectors[np.array(hist_indices)].mean(axis=0, keepdims=True)
         return _normalize_rows(q.astype(np.float32))
 
-    def _retrieve(
-        self, vectors: np.ndarray, hist_indices: list[int], k: int
+    def _search_vectors(
+        self,
+        vectors: np.ndarray,
+        q: np.ndarray,
+        seen: set[int],
+        k: int,
+        index_path: Path | None = None,
     ) -> list[tuple[float, int]]:
-        q = self._encode_user_history(vectors, hist_indices)
-        seen = set(hist_indices)
-
         faiss = _try_import_faiss()
         if faiss is not None:
             idx_obj = None
-            try:
-                if self.settings.index_path.exists():
-                    idx_obj = faiss.read_index(str(self.settings.index_path))
-            except Exception:
-                idx_obj = None
+            if index_path is not None:
+                try:
+                    if index_path.exists():
+                        idx_obj = faiss.read_index(str(index_path))
+                except Exception:
+                    idx_obj = None
 
             if idx_obj is None:
                 idx_obj = faiss.IndexFlatIP(vectors.shape[1])
                 idx_obj.add(vectors.astype(np.float32))
 
-            extra = len(hist_indices)
-            scores, indices = idx_obj.search(q.astype(np.float32), k + extra)
+            extra = len(seen)
+            n_search = min(k + extra, idx_obj.ntotal)
+            scores, indices = idx_obj.search(q.astype(np.float32), n_search)
             results = [
                 (float(s), int(i))
                 for s, i in zip(scores[0], indices[0], strict=True)
-                if int(i) not in seen
+                # FAISS pads with -1 when a query asks for more results than
+                # the index holds; without this filter those sentinel rows
+                # look like a real (very negative-index) hit.
+                if int(i) not in seen and int(i) >= 0
             ]
             return results[:k]
 
@@ -766,8 +1019,82 @@ class RecommenderPipeline:
                 break
         return results
 
+    def _retrieve(
+        self,
+        vectors: np.ndarray,
+        hist_indices: list[int],
+        k: int,
+        text_embs: np.ndarray | None = None,
+        diversify: bool = False,
+        item_titles: list[str] | None = None,
+    ) -> list[tuple[float, int]]:
+        q = self._encode_user_history(vectors, hist_indices)
+        seen = set(hist_indices)
+        # Over-fetch when diversifying so MMR has real alternatives to trade
+        # off against the top hit, not just k items with no slack. 50 wasn't
+        # enough in practice: for a tight-cluster query (e.g. Winter Coat +
+        # Beanie + Gloves) the top 20+ candidates alone are all near-
+        # identical gloves, so MMR had nothing but gloves to choose between.
+        # Genuine variety (scarves, hat/scarf sets) shows up around rank
+        # 20-50, so the pool needs to reach well past there -- see
+        # _mmr_rerank in retrieval.py for the matching lambda_mult tuning.
+        fetch_k = max(k * 10, 100) if diversify else k
+
+        if text_embs is None:
+            results = self._search_vectors(
+                vectors, q, seen, fetch_k, index_path=self.settings.index_path
+            )
+        else:
+            # Hybrid retrieval: blend the trained two-tower sequence signal
+            # with a content-based signal (cosine similarity over raw,
+            # frozen text embeddings). The two-tower's item-ID embeddings are
+            # only as good as how many interactions an item had during
+            # training (see MODEL_CARD.md "Known limitations"), so sparse
+            # items can retrieve arbitrary-looking neighbors. Text embeddings
+            # don't have that dependency -- they're the same regardless of
+            # interaction count -- so blending in this second signal gives
+            # the system a reliability floor the trained model alone doesn't
+            # have. Reciprocal rank fusion combines the two without needing
+            # to calibrate their score scales.
+            n_candidates = max(fetch_k, 50)
+            seq_results = self._search_vectors(
+                vectors, q, seen, n_candidates, index_path=self.settings.index_path
+            )
+
+            valid_hist = [i for i in hist_indices if 0 <= i < len(text_embs)]
+            if valid_hist:
+                content_q = _normalize_rows(
+                    text_embs[np.array(valid_hist)].mean(axis=0, keepdims=True)
+                )
+            else:
+                content_q = _normalize_rows(text_embs.mean(axis=0, keepdims=True))
+            content_results = self._search_vectors(text_embs, content_q, seen, n_candidates)
+
+            fused = _reciprocal_rank_fusion(
+                [[idx for _, idx in seq_results], [idx for _, idx in content_results]]
+            )
+            results = [(score, idx) for score, idx in fused[:fetch_k]]
+
+        if diversify:
+            if item_titles is not None:
+                # Prefer keyword-novelty-aware diversification (doesn't just
+                # avoid near-duplicates among the recs, avoids near-
+                # duplicates of what's already in history) -- see
+                # _diversify_beyond_history in retrieval.py for why this
+                # exists on top of plain MMR.
+                history_titles = [
+                    item_titles[i] for i in hist_indices if 0 <= i < len(item_titles)
+                ]
+                return _diversify_beyond_history(vectors, results, k, history_titles, item_titles)
+            return _mmr_rerank(vectors, results, k)
+        return results[:k]
+
     def _run_eval(
-        self, vectors: np.ndarray, samples: list[tuple[list[int], int]], k: int = 10
+        self,
+        vectors: np.ndarray,
+        samples: list[tuple[list[int], int]],
+        k: int = 10,
+        text_embs: np.ndarray | None = None,
     ) -> EvalMetrics:
         if not samples:
             return EvalMetrics(0.0, 0.0, 0.0)
@@ -779,7 +1106,7 @@ class RecommenderPipeline:
         m_vals: list[float] = []
 
         for hist, target in subset:
-            results = self._retrieve(vectors, hist, k=k)
+            results = self._retrieve(vectors, hist, k=k, text_embs=text_embs)
             r_vals.append(_recall_at_k(results, target, k))
             n_vals.append(_ndcg_at_k(results, target, k))
             m_vals.append(_mrr_at_k(results, target, k))
@@ -790,11 +1117,16 @@ class RecommenderPipeline:
             mrr_at_10=float(sum(m_vals) / max(len(m_vals), 1)),
         )
 
-    def evaluate(self) -> EvalMetrics:
+    def evaluate(self, use_hybrid: bool = False) -> EvalMetrics:
         if not self.settings.vectors_path.exists():
             self.train()
 
         vectors = np.load(self.settings.vectors_path).astype(np.float32)
+        text_embs = None
+        if use_hybrid and self.settings.item_embs_path.exists():
+            text_embs = _normalize_rows(
+                np.load(self.settings.item_embs_path).astype(np.float32)
+            )
 
         split_path = self.settings.artifacts_dir / "splits.json"
         if split_path.exists():
@@ -813,7 +1145,7 @@ class RecommenderPipeline:
             fashion_products, user_events, raw_backup = self.prepare_data()
             asins = fashion_products["asin"].astype(str).tolist()
             asin_to_idx = {a: i for i, a in enumerate(asins)}
-            _, _, val_seqs, _ = _build_sequences(
+            _, _, val_seqs, _, _ = _build_sequences(
                 user_events=user_events,
                 raw_user_events_backup=raw_backup,
                 asin_to_idx=asin_to_idx,
@@ -822,7 +1154,45 @@ class RecommenderPipeline:
                 n_catalog=len(fashion_products),
             )
 
-        return self._run_eval(vectors, val_seqs, k=10)
+        return self._run_eval(vectors, val_seqs, k=10, text_embs=text_embs)
+
+    def evaluate_by_item_warmth(
+        self, use_hybrid: bool = False, cold_threshold: int = 2
+    ) -> dict[str, Any]:
+        """Split val_novel targets into warm/cold by training-target frequency
+        and evaluate each slice separately. A target that appeared
+        <= cold_threshold times as a training target (including never) had
+        little to no gradient signal reach its item-ID embedding, so this
+        isolates whether a change (e.g. id_branch_dropout) actually helps the
+        items an ID-embedding-only model would struggle with -- the headline
+        recall@10 alone is dominated by warm items and can mask a cold-item
+        regression or improvement.
+        """
+        if not self.settings.vectors_path.exists():
+            self.train()
+
+        vectors = np.load(self.settings.vectors_path).astype(np.float32)
+        text_embs = None
+        if use_hybrid and self.settings.item_embs_path.exists():
+            text_embs = _normalize_rows(np.load(self.settings.item_embs_path).astype(np.float32))
+
+        split_path = self.settings.artifacts_dir / "splits.json"
+        splits = json.loads(split_path.read_text(encoding="utf-8"))
+        val_seqs = [
+            (list(map(int, hist)), int(tgt)) for hist, tgt in splits.get("val_novel", [])
+        ]
+        target_freq = Counter(int(t) for _, t in splits.get("train", []))
+
+        warm_seqs = [(h, t) for h, t in val_seqs if target_freq.get(t, 0) > cold_threshold]
+        cold_seqs = [(h, t) for h, t in val_seqs if target_freq.get(t, 0) <= cold_threshold]
+
+        return {
+            "overall": self._run_eval(vectors, val_seqs, k=10, text_embs=text_embs),
+            "warm": self._run_eval(vectors, warm_seqs, k=10, text_embs=text_embs),
+            "cold": self._run_eval(vectors, cold_seqs, k=10, text_embs=text_embs),
+            "n_warm": len(warm_seqs),
+            "n_cold": len(cold_seqs),
+        }
 
     def list_expected_files(self) -> list[Path]:
         return [
@@ -868,6 +1238,9 @@ def recommend_for_history(
         pipeline.train()
 
     vectors = np.load(settings.vectors_path).astype(np.float32)
+    text_embs = None
+    if settings.item_embs_path.exists():
+        text_embs = _normalize_rows(np.load(settings.item_embs_path).astype(np.float32))
 
     if settings.catalog_cache_path.exists():
         catalog = pd.read_csv(settings.catalog_cache_path)
@@ -882,6 +1255,7 @@ def recommend_for_history(
         catalog["imgUrl"] = ""
 
     matched_indices: list[int] = []
+    unmatched_queries: list[str] = []
     for query in history:
         q = query.strip()
         if not q:
@@ -891,14 +1265,91 @@ def recommend_for_history(
             match = catalog[catalog["categories"].astype(str).str.contains(q, case=False, na=False)]
         if len(match) > 0:
             matched_indices.append(int(match.index[0]))
+        else:
+            unmatched_queries.append(q)
 
-    if not matched_indices:
-        matched_indices = [0]
+    # Semantic fallback: substring matching is exact and misses typos or
+    # paraphrases ("swim trunks" vs. "Swim Trunk", "sunnies" vs.
+    # "Sunglasses"). Embed whatever didn't match and take the nearest
+    # catalog item by cosine similarity, but only above a similarity floor --
+    # otherwise genuinely unrecognizable input (no fashion signal at all)
+    # would always resolve to *some* nearest neighbor and this would never
+    # fall through to the popularity fallback below, which is the correct
+    # behavior for real user cold-start (see MODEL_CARD.md "User cold-start").
+    # 0.65, not something lower like 0.3: CLIP-family text embeddings are
+    # anisotropic (Ethayarajh 2019) -- unrelated text pairs already sit
+    # around cosine 0.55-0.6 in this space, unlike sentence-transformer
+    # models tuned for calibrated semantic-textual-similarity scores. This
+    # floor is encoder-specific; measured against
+    # data_real/fashion_products_kcore3.csv with patrickjohncyh/fashion-clip
+    # specifically: genuine queries ("swim trunks", "sunnies", "a comfy
+    # hoodie for winter") scored 0.70-0.80 best-match; nonsense queries
+    # scored 0.58-0.59 on a 500-item sample. On the full ~5,015-item catalog
+    # nonsense queries can spuriously hit up to 0.75, because a handful of
+    # items have degenerate 1-2 word titles ("Fashion", "Casmonal",
+    # "4 Pairs" -- malformed source metadata, ~0.2% of the catalog) that
+    # embed as generic attractors for almost any query. Excluding those from
+    # eligibility as a match *target* (they're still fully retrievable as
+    # recommendations, just not valid "this is what you meant" matches for a
+    # garbage query) removes the false-positive source at its cause instead
+    # of chasing an unreliable threshold around it.
+    _SEMANTIC_MATCH_FLOOR = 0.65
+    _MIN_TITLE_WORDS_FOR_MATCH_TARGET = 3
+    if unmatched_queries and text_embs is not None:
+        query_vecs = _normalize_rows(pipeline._encode_texts(unmatched_queries))
+        sims = query_vecs @ text_embs.T
+        title_words = catalog["title"].astype(str).str.split().str.len()
+        eligible = title_words >= _MIN_TITLE_WORDS_FOR_MATCH_TARGET
+        sims[:, ~eligible.to_numpy()] = -1.0
+        best_idx = sims.argmax(axis=1)
+        best_sim = sims.max(axis=1)
+        for idx, sim in zip(best_idx.tolist(), best_sim.tolist(), strict=True):
+            if sim >= _SEMANTIC_MATCH_FLOOR:
+                matched_indices.append(int(idx))
 
     def _clean_str(value: Any) -> str:
         return "" if pd.isna(value) else str(value)
 
-    retrieved = pipeline._retrieve(vectors, matched_indices, k=top_k)
+    if not matched_indices:
+        # Genuine user cold-start: no history to condition on, so there is no
+        # sequence to feed the user tower and nothing to search "similar to" --
+        # falling back to an arbitrary catalog row (as this used to do) is not
+        # a real recommendation. Standard practice for this case is a
+        # popularity/trending fallback until the user accrues real signal.
+        popular_ranking: list[int] = []
+        if settings.popular_items_path.exists():
+            try:
+                popular_ranking = json.loads(
+                    settings.popular_items_path.read_text(encoding="utf-8")
+                )
+            except Exception:
+                popular_ranking = []
+        if not popular_ranking:
+            popular_ranking = list(range(len(catalog)))
+
+        out = []
+        for rank, idx in enumerate(popular_ranking[:top_k], start=1):
+            row = catalog.iloc[idx]
+            out.append(
+                {
+                    "rank": rank,
+                    "item_index": int(idx),
+                    "title": _clean_str(row.get("title", "")),
+                    "categories": _clean_str(row.get("categories", "")),
+                    "image_url": _clean_str(row.get("imgUrl", "")),
+                    "score": 0.0,
+                }
+            )
+        return out
+
+    retrieved = pipeline._retrieve(
+        vectors,
+        matched_indices,
+        k=top_k,
+        text_embs=text_embs,
+        diversify=True,
+        item_titles=catalog["title"].astype(str).tolist(),
+    )
     out: list[dict[str, object]] = []
     for rank, (score, idx) in enumerate(retrieved, start=1):
         row = catalog.iloc[idx]

@@ -11,8 +11,10 @@ COPY src ./src
 COPY ui ./ui
 
 # Serving only needs the already-trained model + FAISS index, not the
-# sentence-transformers/CLIP encoders used at training time -- the `ci`
-# extra (torch + faiss-cpu) plus `api` (fastapi + uvicorn) is the full set.
+# fashion-clip encoder used at training time (and for the semantic
+# history-matching fallback, which degrades to a deterministic hash encoder
+# without it) -- the `ci` extra (torch + faiss-cpu) plus `api` (fastapi +
+# uvicorn) is the full set.
 RUN pip install --no-cache-dir -e ".[ci,api]"
 
 # Trained artifacts (item_index_v11.faiss, item_tower_vecs_v11.npy, the
