@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fastapi-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "source .venv/bin/activate && RECO_DRIVE_DIR=data_real uvicorn recommender.api:app --host 0.0.0.0 --port 8000 --app-dir src"
+      ],
+      "port": 8000
+    }
+  ]
+}

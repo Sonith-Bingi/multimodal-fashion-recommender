@@ -15,27 +15,24 @@
 
   const API_BASE = resolveApiBase();
 
-  const SUGGESTIONS = [
-    "Swim Trunk",
-    "Sunglasses",
-    "Flip Flop",
-    "Denim Jacket",
-    "Running Shoes",
-    "Wool Coat",
-    "Leather Wallet",
-    "Graphic T-Shirt",
-  ];
+  const CATEGORIES = window.CATALOG_SUGGESTIONS || [];
+  const ALL_ITEMS = CATEGORIES.flatMap((c) => c.items);
 
   const state = {
     history: [],
+    activeCategory: CATEGORIES.length ? CATEGORIES[0].category : null,
   };
 
   const el = {
     itemInput: document.getElementById("item-input"),
     addBtn: document.getElementById("add-btn"),
+    autocomplete: document.getElementById("autocomplete"),
+    categoryTabs: document.getElementById("category-tabs"),
     suggestions: document.getElementById("suggestions"),
     history: document.getElementById("history"),
+    emptyHint: document.getElementById("empty-hint"),
     topK: document.getElementById("top-k"),
+    clearBtn: document.getElementById("clear-btn"),
     recommendBtn: document.getElementById("recommend-btn"),
     statusLine: document.getElementById("status-line"),
     results: document.getElementById("results"),
@@ -48,6 +45,7 @@
     state.history.push(trimmed);
     renderHistory();
     el.itemInput.value = "";
+    hideAutocomplete();
     el.itemInput.focus();
   }
 
@@ -56,35 +54,92 @@
     renderHistory();
   }
 
+  function renderCategoryTabs() {
+    el.categoryTabs.innerHTML = "";
+    for (const { category } of CATEGORIES) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "tab" + (category === state.activeCategory ? " active" : "");
+      tab.textContent = category;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", category === state.activeCategory ? "true" : "false");
+      tab.addEventListener("click", () => {
+        state.activeCategory = category;
+        renderCategoryTabs();
+        renderSuggestions();
+      });
+      el.categoryTabs.appendChild(tab);
+    }
+  }
+
   function renderSuggestions() {
     el.suggestions.innerHTML = "";
-    for (const s of SUGGESTIONS) {
+    const active = CATEGORIES.find((c) => c.category === state.activeCategory);
+    if (!active) return;
+    for (const item of active.items) {
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "chip suggestion";
-      chip.textContent = `+ ${s}`;
-      chip.addEventListener("click", () => addItem(s));
+      chip.textContent = `+ ${item}`;
+      chip.addEventListener("click", () => addItem(item));
       el.suggestions.appendChild(chip);
     }
   }
 
+  function hideAutocomplete() {
+    el.autocomplete.hidden = true;
+    el.autocomplete.innerHTML = "";
+  }
+
+  function renderAutocomplete(query) {
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      hideAutocomplete();
+      return;
+    }
+    const matches = ALL_ITEMS.filter((item) => item.toLowerCase().includes(q)).slice(0, 8);
+    if (!matches.length) {
+      hideAutocomplete();
+      return;
+    }
+    el.autocomplete.innerHTML = "";
+    for (const item of matches) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "autocomplete-item";
+      row.textContent = item;
+      row.addEventListener("mousedown", (e) => {
+        // mousedown (not click) so this fires before the input's blur hides the list
+        e.preventDefault();
+        addItem(item);
+      });
+      el.autocomplete.appendChild(row);
+    }
+    el.autocomplete.hidden = false;
+  }
+
   function renderHistory() {
     el.history.innerHTML = "";
-    state.history.forEach((item, index) => {
-      const chip = document.createElement("span");
-      chip.className = "chip history-item";
-      chip.textContent = item + " ";
+    if (state.history.length === 0) {
+      el.history.appendChild(el.emptyHint);
+    } else {
+      state.history.forEach((item, index) => {
+        const chip = document.createElement("span");
+        chip.className = "chip history-item";
+        chip.textContent = item + " ";
 
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.setAttribute("aria-label", `Remove ${item}`);
-      remove.textContent = "×";
-      remove.addEventListener("click", () => removeItem(index));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.setAttribute("aria-label", `Remove ${item}`);
+        remove.textContent = "×";
+        remove.addEventListener("click", () => removeItem(index));
 
-      chip.appendChild(remove);
-      el.history.appendChild(chip);
-    });
+        chip.appendChild(remove);
+        el.history.appendChild(chip);
+      });
+    }
     el.recommendBtn.disabled = state.history.length === 0;
+    el.clearBtn.disabled = state.history.length === 0;
   }
 
   function setStatus(message, isError) {
@@ -100,9 +155,10 @@
     }
     const maxScore = Math.max(...recommendations.map((r) => r.score), 1e-9);
 
-    for (const rec of recommendations) {
+    recommendations.forEach((rec, i) => {
       const card = document.createElement("div");
       card.className = "card";
+      card.style.animationDelay = `${Math.min(i, 10) * 35}ms`;
 
       const thumb = document.createElement("div");
       thumb.className = "thumb" + (rec.image_url ? "" : " no-image");
@@ -146,11 +202,12 @@
       card.appendChild(thumb);
       card.appendChild(body);
       el.results.appendChild(card);
-    }
+    });
   }
 
   async function getRecommendations() {
     el.recommendBtn.disabled = true;
+    el.recommendBtn.classList.add("loading");
     setStatus("Loading recommendations…", false);
     el.results.innerHTML = "";
 
@@ -183,6 +240,7 @@
     } catch (err) {
       setStatus(`Could not reach the API at "${API_BASE || window.location.origin}": ${err.message}`, true);
     } finally {
+      el.recommendBtn.classList.remove("loading");
       el.recommendBtn.disabled = state.history.length === 0;
     }
   }
@@ -192,12 +250,28 @@
     if (e.key === "Enter") {
       e.preventDefault();
       addItem(el.itemInput.value);
+    } else if (e.key === "Escape") {
+      hideAutocomplete();
     }
   });
+  el.itemInput.addEventListener("input", () => renderAutocomplete(el.itemInput.value));
+  el.itemInput.addEventListener("focus", () => renderAutocomplete(el.itemInput.value));
+  el.itemInput.addEventListener("blur", () => {
+    // Delay so a mousedown on an autocomplete row (which prevents default,
+    // see renderAutocomplete) still lands before the list disappears.
+    setTimeout(hideAutocomplete, 120);
+  });
+
+  el.clearBtn.addEventListener("click", () => {
+    state.history = [];
+    renderHistory();
+  });
+
   el.recommendBtn.addEventListener("click", getRecommendations);
 
   el.apiInfo.textContent = `API: ${API_BASE || window.location.origin}`;
 
+  renderCategoryTabs();
   renderSuggestions();
   renderHistory();
 })();

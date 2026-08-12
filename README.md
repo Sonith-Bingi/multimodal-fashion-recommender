@@ -3,8 +3,11 @@
 A two-tower sequence-aware recommender for Amazon Fashion, trained and
 evaluated on real Amazon Reviews 2023 data — not a toy dataset. A transformer
 user tower encodes purchase history; an attention-fused item tower combines
-text, image (CLIP), and learned ID embeddings. Served over a FastAPI +
-Docker deployment, live on Hugging Face Spaces.
+fashion-domain-tuned text and image embeddings (`patrickjohncyh/fashion-clip`,
+a real, verified +7.7% recall@10 improvement over generic CLIP + a generic
+text encoder — see [MODEL_CARD.md](MODEL_CARD.md)) with a learned ID
+embedding. Served over a FastAPI + Docker deployment, live on Hugging Face
+Spaces.
 
 **Live demo:** https://huggingface.co/spaces/htinos/multimodal-fashion-recommender
 
@@ -45,6 +48,13 @@ added complexity earns its keep, and the numbers are honest.**
 - **Reproducible.** Deterministic training (`torch.manual_seed`, seeded
   DataLoader shuffling) — two independent runs on the same data produce
   byte-identical metrics.
+- **Cold-start handled, not ignored, and the negative results are reported
+  too.** New users get a real popularity fallback instead of a hidden bug
+  that served neighbors of an arbitrary catalog row. A literature technique
+  for item cold-start (DropoutNet-style ID-branch dropout) was swept across
+  5 rates on real data and adopted only where it actually helped — the model
+  card documents the honest finding that it improved overall/warm metrics
+  but did *not* specifically fix cold items, rather than overselling it.
 
 ## Results
 
@@ -53,19 +63,18 @@ Real Amazon Fashion data, `dense_k=3`, evaluated on genuinely novel targets
 
 | metric | sequence tower | mean-pooling baseline |
 |---|---|---|
-| recall@10 | **0.1695** | 0.1020 |
-| ndcg@10 | **0.1132** | 0.0560 |
-| mrr@10 | **0.0961** | 0.0421 |
+| recall@10 | **0.1760** | 0.1020 |
+| ndcg@10 | **0.1179** | 0.0560 |
+| mrr@10 | **0.1000** | 0.0421 |
 
-Recall@10 of 17% against a 5,015-item catalog is ~85x better than random
+Recall@10 of ~18% against a 5,015-item catalog is ~88x better than random
 chance (0.2%).
 
 ## Tech stack
 
 **ML / modeling**
 - [PyTorch](https://pytorch.org/) — two-tower model (transformer user tower, attention-fused item tower), training loop, mixed precision
-- [Sentence-Transformers](https://www.sbert.net/) (`all-mpnet-base-v2`) — real semantic text embeddings
-- Hugging Face [`transformers`](https://huggingface.co/docs/transformers) (CLIP ViT-B/32) — image embeddings
+- Hugging Face [`transformers`](https://huggingface.co/docs/transformers) (`patrickjohncyh/fashion-clip`) — fashion-domain-tuned text *and* image embeddings in one joint space
 - [FAISS](https://github.com/facebookresearch/faiss) (`faiss-cpu`) — nearest-neighbor retrieval index
 - NumPy / Pandas — k-core filtering, sequence construction, embedding math
 
@@ -98,17 +107,17 @@ chance (0.2%).
 
 1. **Ingest** — download `meta_Amazon_Fashion.jsonl` / `Amazon_Fashion.jsonl` from the Hugging Face Hub.
 2. **Densify** — iterative k-core filtering drops users/items with fewer than `k` interactions until convergence. On the real dataset this collapses **2,035,398 raw users down to a dense 5,277-user / 5,015-item subset**.
-3. **Embed items** — each catalog item gets a text embedding (Sentence-Transformer, or a deterministic hash fallback if unavailable), a CLIP image embedding (computed for the top 5,000 most-frequent training targets), and a learned ID embedding.
+3. **Embed items** — each catalog item gets a text embedding and a CLIP image embedding from the same `patrickjohncyh/fashion-clip` checkpoint (computed for the top 5,000 most-frequent training targets; deterministic hash fallback if unavailable) and a learned ID embedding. Price and brand/store fusion, and a time-gap-aware position embedding, are also implemented but off by default (see [model card](MODEL_CARD.md) for why).
 4. **Build sequences** — each user's interaction history becomes training windows plus a held-out validation target — both a naive "last interaction" target and a *genuinely novel* one (`val_novel`), which the [model card](MODEL_CARD.md) explains is the one that's actually fair to evaluate on.
-5. **Train** — the two-tower model trains against a temperature-scaled contrastive loss over a popularity pool of training-target items (AdamW, cosine annealing, early stopping on EMA-smoothed validation loss). Fully deterministic given a fixed seed.
+5. **Train** — the two-tower model trains against a temperature-scaled contrastive loss over a popularity pool of training-target items, with an optional corrected logQ popularity-bias correction and optional mixed negative sampling (AdamW, cosine annealing, early stopping on EMA-smoothed validation loss). Fully deterministic given a fixed seed.
 6. **Index** — the trained item tower encodes the full catalog once; L2-normalized vectors are written to a FAISS `IndexFlatIP` index and saved to disk alongside the model checkpoint.
 
 **Online — serving a request** (`api.py`, `retrieval.py`)
 
 1. `POST /recommend` arrives with a list of history strings, e.g. `["Swim Trunk", "Sunglasses"]`.
-2. Each string is matched to a catalog item by substring search over title/category.
+2. Each string is matched to a catalog item by substring search over title/category, falling back to embedding similarity for typos/paraphrases.
 3. The matched items' embeddings are run through the **already-trained** user tower (loaded once at process startup and reused across requests, not reloaded per call) to produce one query vector.
-4. FAISS returns the nearest item vectors, excluding anything already in the supplied history.
+4. FAISS returns the nearest item vectors, excluding anything already in the supplied history, then re-ranks the top candidates for diversity (MMR) so results aren't dominated by near-duplicate items.
 5. Results (title, category, image URL, similarity score) come back as JSON, or get rendered directly as cards by the `ui/` frontend.
 
 ## Architecture
@@ -121,8 +130,8 @@ flowchart LR
     end
 
     subgraph item["Item tower — run once per catalog item (models.py: ItemTower)"]
-        TXT["Title + category text"] --> TE["Text encoder\n(Sentence-Transformer)"]
-        IMG["Product image"] --> IE["CLIP image encoder"]
+        TXT["Title + category text"] --> TE["fashion-clip\n(text)"]
+        IMG["Product image"] --> IE["fashion-clip\n(image)"]
         ID["Item ID"] --> IDE["Learned ID embedding"]
         TE --> FUSE["Multi-head attention fusion\n(image gated, starts near-zero)"]
         IE --> FUSE
@@ -132,17 +141,25 @@ flowchart LR
 
     IV --> FAISS[("FAISS index\nIndexFlatIP")]
     UV --> FAISS
-    FAISS --> OUT["Top-K recommendations\n(history items excluded)"]
+    FAISS --> MMR["MMR diversity re-rank"]
+    MMR --> OUT["Top-K recommendations\n(history items excluded)"]
 ```
 
 - **User tower:** transformer encoder (positional embeddings, multi-head
-  self-attention) over interaction history → 256-dim vector.
-- **Item tower:** text projection + CLIP image projection (learned sigmoid
-  gate, starts near-zero) + learned item-ID embedding, fused via multi-head
-  attention across the three signals.
+  self-attention) over interaction history → 256-dim vector. A time-gap
+  embedding is implemented but off by default (see
+  [MODEL_CARD.md](MODEL_CARD.md)).
+- **Item tower:** text + image projection (single `patrickjohncyh/fashion-
+  clip` checkpoint, image gated with a learned sigmoid gate starting
+  near-zero) + learned item-ID embedding, fused via multi-head attention.
+  Price/brand fusion is implemented but off by default (see
+  [MODEL_CARD.md](MODEL_CARD.md)).
 - **Training:** temperature-scaled contrastive loss against a popularity
-  pool, AdamW + cosine annealing, early stopping (see `train.py`).
-- **Retrieval:** FAISS `IndexFlatIP` nearest-neighbor search (`retrieval.py`).
+  pool (with an optional corrected logQ bias correction and optional mixed
+  negative sampling), AdamW + cosine annealing, early stopping (see
+  `train.py`).
+- **Retrieval:** FAISS `IndexFlatIP` nearest-neighbor search, MMR diversity
+  re-ranking on the serving path (`retrieval.py`).
 
 ## Repository structure
 
@@ -172,8 +189,8 @@ flowchart LR
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,ci]"        # add [train] instead of [ci] for real
-                                    # sentence-transformers/CLIP encoders
+pip install -e ".[dev,ci]"        # add [train] instead of [ci] for the real
+                                    # fashion-clip text/image encoders
 cp .env.example .env               # optional: point RECO_DRIVE_DIR at your data
 reco check                          # validate artifacts
 pytest                               # fully offline, ~10s
